@@ -34,8 +34,8 @@ var (
   kb get <id>                      打印条目全文（含 front matter）
   kb ls <id>                       列出该目录的直接子项
   kb tree [<id>] [--depth N]       打印结构，默认 3 层
-  kb add <草稿.md> [--force]       收编新增：分配该层第一个空位前缀；元数据用 --category/--title/--alias 给
-  kb update <id> <草稿.md> [--to <目录id>] [--title X] [--alias a,b]   改内容；带 --to 则搬家
+  kb add <草稿.md> [--force]       收编新增：分配该层第一个空位前缀；元数据用 --category/--title/--tags 给
+  kb update <id> <草稿.md> [--to <目录id>] [--title X] [--tags a,b]   改内容；带 --to 则搬家
   kb move <id> <目标目录id>         移动一个条目或一整棵子树
   kb delete <id> --force           删除
   kb retag                         把库里所有条目的 front matter 重写为 title/tags/updated
@@ -76,13 +76,7 @@ func readEntry(p string) (Meta, string, error) {
 	return m, body, nil
 }
 
-// tags 兼容旧的 aliases 字段
-func metaTags(m Meta) string {
-	if v, ok := m["tags"]; ok {
-		return v
-	}
-	return m["aliases"]
-}
+func metaTags(m Meta) string { return m["tags"] }
 
 func rel(p string) string {
 	r, _ := filepath.Rel(kbDir, p)
@@ -269,6 +263,7 @@ func rebuild() {
 		res, err := db.Exec(`INSERT INTO entries(path,kind,title,summary,category,updated,tags,body,ident)
           VALUES(?,?,?,?,?,?,?,?,?)`, r, "leaf", m["title"], summary(body), filepath.Dir(r), m["updated"], metaTags(m), body, mustID(r))
 		if err != nil {
+			fmt.Println("  !! 写入数据库失败：" + err.Error())
 			continue
 		}
 		id, _ := res.LastInsertId()
@@ -503,12 +498,12 @@ func doAdd(draft string, force bool, args []string) int {
 	if title == "" {
 		title = m["title"]
 	}
-	tags := flagValue(args, "--alias")
+	tags := flagValue(args, "--tags")
 	if tags == "" {
 		tags = metaTags(m)
 	}
 	if cat == "" || title == "" || tags == "" {
-		fmt.Println("缺元数据：用 --category/--title/--alias 给；front matter 由 kb 生成")
+		fmt.Println("缺元数据：用 --category/--title/--tags 给；front matter 由 kb 生成")
 		return 1
 	}
 	text := makeFM(title, tags) + strings.TrimSpace(body) + "\n"
@@ -558,7 +553,7 @@ func doUpdate(id, draft, to string, args []string) int {
 	if title == "" {
 		title = cur["title"]
 	}
-	tags := flagValue(args, "--alias")
+	tags := flagValue(args, "--tags")
 	if tags == "" {
 		tags = metaTags(cur)
 	}
@@ -888,7 +883,7 @@ func main() {
 		pos := []string{}
 		for i := 0; i < len(rest); i++ {
 			if strings.HasPrefix(rest[i], "--") {
-				if rest[i] == "--to" || rest[i] == "--title" || rest[i] == "--alias" {
+				if rest[i] == "--to" || rest[i] == "--title" || rest[i] == "--tags" {
 					i++
 				}
 				continue

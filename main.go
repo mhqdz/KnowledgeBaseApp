@@ -348,14 +348,15 @@ func upsert(p string) {
 	m, body, _ := readEntry(p)
 	db := openDB()
 	defer db.Close()
-	res, err := db.Exec(`INSERT INTO entries(path,kind,title,summary,category,updated,tags,ident)
+	_, err := db.Exec(`INSERT INTO entries(path,kind,title,summary,category,updated,tags,ident)
       VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET title=excluded.title,summary=excluded.summary,
       updated=excluded.updated,tags=excluded.tags,ident=excluded.ident`,
 		r, "leaf", m["title"], summary(body), filepath.Dir(r), m["updated"], metaTags(m), body, mustID(r))
 	if err != nil {
 		return
 	}
-	id, _ := res.LastInsertId()
+	var id int64
+	db.QueryRow("SELECT id FROM entries WHERE path=?", r).Scan(&id)   // 不能用 LastInsertId：upsert 命中冲突时它不会更新
 	db.Exec("DELETE FROM tags WHERE entry_id=?", id)
 	for _, t := range strings.Split(metaTags(m), ",") {
 		if s := strings.TrimSpace(t); s != "" {
@@ -576,6 +577,10 @@ func resolveCategory(cat string) (string, error) {
 		if part == "" {
 			continue
 		}
+		if part == "." || part == ".." || filepath.IsAbs(part) || strings.ContainsAny(part, "\\") {
+			fmt.Printf("非法目录段（不许 . / .. / 绝对路径 / 反斜杠）：%s\n", part)
+			return "", fmt.Errorf("bad category")
+		}
 		want := part
 		if rePFX.MatchString(part) {
 			want = part[3:]
@@ -706,6 +711,10 @@ func doUpdate(id, draft, to string, args []string) int {
 			fmt.Printf("目标目录不存在：%s\n", to)
 			return 1
 		}
+		if st, err := os.Stat(tgt); err != nil || !st.IsDir() {
+			fmt.Printf("目标必须是目录 id（不能是条目）：%s\n", to)
+			return 1
+		}
 		slot := freeSlot(tgt)
 		base := filepath.Base(p)
 		name := base
@@ -744,6 +753,10 @@ func doMove(id, target string) int {
 	tgt := idToPath(target)
 	if tgt == "" {
 		fmt.Printf("目标目录不存在：%s\n", target)
+		return 1
+	}
+	if st, err := os.Stat(tgt); err != nil || !st.IsDir() {
+		fmt.Printf("目标必须是目录 id（不能是条目）：%s\n", target)
 		return 1
 	}
 	if filepath.Dir(p) == tgt {

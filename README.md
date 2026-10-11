@@ -7,6 +7,8 @@
 - 维护：`kb index`（重建 SQLite 派生缓存）、`kb lint`（只读体检）、`kb push / sync`
 - front matter 由本工具生成，字段只有 **title / tags / updated**（category 由路径表达，不重复存）
 
+> `kb.py.legacy` 是移植前的 Python 实现，仅作行为对照，不要运行或修改。
+
 ## 编译
 ```bash
 export PATH=$PATH:/usr/local/go/bin

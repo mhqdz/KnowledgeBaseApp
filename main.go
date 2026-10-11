@@ -252,9 +252,17 @@ func existingTags() []string {
 	return out
 }
 
-// 返回 (必须确认的, 仅提示的)：拼写近似 → 必拦；包含关系 → 只提示
+// 规则：同一份 tags 内部有包含/近似 → 必须确认；跨条目：拼写近似必须确认，包含关系只提示
 func similarTags(tags string, self string) (blocking []string, hints []string) {
-	ex := existingTags()
+	list := splitTags(tags)
+	for a := 0; a < len(list); a++ {
+		for b := a + 1; b < len(list); b++ {
+			l1, l2 := strings.ToLower(list[a]), strings.ToLower(list[b])
+			if strings.Contains(l1, l2) || strings.Contains(l2, l1) || editDist(l1, l2) <= 1 {
+				blocking = append(blocking, fmt.Sprintf("同一条目里两个 tag 重复或近似：%q 与 %q —— 只留一个（一般留更通用的那个）", list[a], list[b]))
+			}
+		}
+	}
 	selfSet := map[string]bool{}
 	if self != "" {
 		if m, _, err := readEntry(self); err == nil {
@@ -263,12 +271,12 @@ func similarTags(tags string, self string) (blocking []string, hints []string) {
 			}
 		}
 	}
-	for _, nt := range splitTags(tags) {
+	for _, nt := range list {
 		l1 := strings.ToLower(nt)
-		for _, et := range ex {
+		for _, et := range existingTags() {
 			l2 := strings.ToLower(et)
 			if l1 == l2 || selfSet[l2] {
-				continue // 跳过自己条目里已有的 tag
+				continue
 			}
 			n := len([]rune(l1))
 			if m := len([]rune(l2)); m > n {
@@ -278,7 +286,7 @@ func similarTags(tags string, self string) (blocking []string, hints []string) {
 			if d > 0 && ((n >= 4 && d*3 <= n) || (n < 4 && d <= 1)) {
 				blocking = append(blocking, fmt.Sprintf("新 tag 与已有 tag 拼写近似：%q ~ %q（是否改用已有的 %q？）", nt, et, et))
 			} else if strings.Contains(l1, l2) || strings.Contains(l2, l1) {
-				hints = append(hints, fmt.Sprintf("提示：新 tag %q 与已有 tag %q 有包含关系，确认是否需要同时保留", nt, et))
+				hints = append(hints, fmt.Sprintf("提示：tag %q 与其它条目的 %q 有包含关系，确认是否都要保留", nt, et))
 			}
 		}
 	}

@@ -896,7 +896,7 @@ func main() {
 	case "lint":
 		os.Exit(doLint())
 	case "search":
-		os.Exit(doSearch(arg(rest, 0), 5, hasFlag(args, "--json")))
+		os.Exit(doSearch(firstPositional(rest), 5, hasFlag(args, "--json")))
 	case "push":
 		os.Exit(push(false))
 	case "sync":
@@ -905,6 +905,19 @@ func main() {
 		fmt.Println(usageTx)
 		os.Exit(2)
 	}
+}
+
+func firstPositional(a []string) string {
+	for i := 0; i < len(a); i++ {
+		if strings.HasPrefix(a[i], "--") {
+			if a[i] == "--depth" || a[i] == "--to" || a[i] == "--title" || a[i] == "--tags" || a[i] == "--category" {
+				i++
+			}
+			continue
+		}
+		return a[i]
+	}
+	return ""
 }
 
 func arg(a []string, i int) string {

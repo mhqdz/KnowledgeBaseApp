@@ -647,8 +647,16 @@ func doAdd(draft string, force bool, args []string) int {
 		fmt.Println("流程：先把这些连同条目原文给用户看 → 用户确认 → 再加 --force 重跑")
 		return 2
 	}
-	d, _ := resolveCategory(cat)
+	d, err := resolveCategory(cat)
+	if err != nil || d == "" {
+		fmt.Println("目录无效，已中止（未写入任何文件）")
+		return 1
+	}
 	slot := freeSlot(d)
+	if slot == "" {
+		fmt.Println("该层前缀已用尽（1296 个）")
+		return 1
+	}
 	name := strings.TrimSpace(reBad.ReplaceAllString(title, "-"))
 	if name == "" {
 		name = strings.TrimSuffix(filepath.Base(draft), D)

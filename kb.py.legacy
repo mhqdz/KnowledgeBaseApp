@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""kb — 本地知识库。id = 路径每段前 2 位（36 进制）拼接；.kbx = 已收编（不得手工改）；.md = 草稿。"""
+import json, os, re, sqlite3, subprocess, sys, pathlib, datetime
+
+KB = pathlib.Path(os.environ.get("KB_ROOT", pathlib.Path.home() / ".data" / ".kb"))
+DB = pathlib.Path(os.environ.get("KB_DB", pathlib.Path.home() / ".cache" / "kb.sqlite"))
+B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+E, D, TPL = ".kbx", ".md", "TEMPLATE.md"
+FM = re.compile(r"^---\n(.*?)\n---\n", re.S)
+ID2 = re.compile(r"^[0-9a-z]{2}")
+PFX = re.compile(r"^[0-9a-z]{2}-")   # 名字里"带前缀"的形式：00-xxx
+CMD = re.compile(r"(?m)^\s*(sudo )?(systemctl|git|ls|cat|grep|rg|sed|awk|find|python3?|kb|curl|wget|docker|aria2c|ssh|nvidia-smi|fcitx5[-a-z]*|pacman|journalctl|tar|cp|mv|rm|chmod|ss|ps|kill|pgrep|systemd-run|tr|env|export|llm-local|nproc|free|lscpu|lsblk|df|du|ip|ping|mount|umount|uptime|nvtop|btop|dsh|aria2|cargo|cmake|make|gcc|clang|pip|npm|pnpm|uv|openssl|sha256sum|sed|tee|xargs|head|tail|wc|sort|uniq|diff|mkdir|rmdir|ln|touch|stat|file|which|type|echo|printf|test|time)\b")
+USAGE = """kb — 本地知识库
+
+  kb id <路径>                     路径 → id（工具负责推导，不要自己回溯）
+  kb get <id>                      打印条目全文（含 front matter）
+  kb ls <id>                       列出该目录的直接子项
+  kb tree [<id>] [--depth N]       打印结构（默认 3 层）
+  kb add <草稿.md> [--force]       收编新增：分配该层第一个空位前缀
+  kb update <id> <草稿.md> [--to 目录id]   改内容；带 --to 则搬家（重分配前缀）
+  kb move <id> <目标目录id>         移动条目/整棵子树（改名即改 id，一次提交）
+  kb delete <id> --force           删除
+  kb index / lint / dup / push / sync / help
+
+新增/修改前先 kb get 0103 读详细文档与要求（不要凭印象直接改）。
+"""
+
+def parse(p):
+    t = p.read_text(encoding="utf-8", errors="replace"); m = FM.match(t); meta = {}; body = t
+    if m:
+        body = t[m.end():]
+        for line in m.group(1).splitlines():
+            if ":" in line and not line.startswith(" "):
+                k, v = line.split(":", 1); v = v.strip()
+                if v.startswith("[") and v.endswith("]"):
+                    v = [x.strip() for x in v[1:-1].split(",") if x.strip()]
+                meta[k.strip()] = v
+    return meta, body
+
+def parse_text(t):
+    m = FM.match(t); meta = {}; body = t
+    if m:
+        body = t[m.end():]
+        for line in m.group(1).splitlines():
+            if ":" in line and not line.startswith(" "):
+                k, v = line.split(":", 1); v = v.strip()
+                if v.startswith("[") and v.endswith("]"):
+                    v = [x.strip() for x in v[1:-1].split(",") if x.strip()]
+                meta[k.strip()] = v
+    return meta, body
+
+
+def has_cmd(b): return ("`" in b) or bool(CMD.search(b))
+def rel(p): return str(p.relative_to(KB))
+def segments(r): return [s for s in pathlib.Path(r).parts]
+def ident_of(r):
+    """路径 → id：每段取前两位；段名没有合法前缀就返回 None"""
+    out = []
+    for s in segments(r):
+        m = PFX.match(s)          # 必须是 00- 形式；kb 只管自己的数据
+        if not m: return None
+        out.append(m.group(0)[:2])
+    return "".join(out)
+def is_entry(p): return p.is_file() and p.name.endswith(E) and p.name != TPL
+def entries(): return sorted(p for p in KB.rglob("*" + E) if ".git" not in p.parts and p.name != TPL)
+def dirs(): return sorted(p for p in KB.rglob("*") if p.is_dir() and ".git" not in p.parts)
+def drafts(): return sorted(p for p in KB.rglob("*" + D) if ".git" not in p.parts and p.name != TPL)
+def id2path(ident):
+    """id → 路径（文件优先，其次目录）；精确匹配"""
+    for p in entries():
+        if ident_of(rel(p)) == ident: return p
+    for p in dirs():
+        if ident_of(rel(p)) == ident: return p
+    return None
+def summary(body):
+    for l in body.splitlines():
+        l = l.strip()
+        if l and not l.startswith("#") and not l.startswith("|"): return l.replace("**", "")[:100]
+    return ""
+def free_slot(d):
+    """目录 d 里第一个未占用的 2 位前缀"""
+    used = set()
+    for x in d.iterdir():
+        if x.name == TPL: continue
+        m = ID2.match(x.name)
+        if m: used.add(m.group(0))
+    for n in range(36 * 36):
+        s = B36[n // 36] + B36[n % 36]
+        if s not in used: return s
+    return None
+def check(meta, text):
+    p = []
+    for k in ("title",):
+        if not str(meta.get(k, "")).strip(): p.append("缺 " + k)
+    if not (meta.get("aliases") or []): p.append("缺 aliases")
+    if len(text.encode()) > 10240: p.append("超过 10 KB（一条目=一个事实）")
+    if "**" in text or "__" in text: p.append("有加粗标记（不需要人类装饰）")
+    return p
+def strip_meta(text):
+    """去掉 front matter 里的 id 行（id 由文件名承载）"""
+    m = FM.match(text)
+    if not m: return text
+    fm = "\n".join(l for l in m.group(1).splitlines() if not l.startswith("id:"))
+    return "---\n" + fm + "\n---\n" + text[m.end():]
+
+
+def make_fm(title, aliases):
+    """front matter 由 kb 生成：只有 title/aliases/updated/source。category 由路径表达，不重复存；不记 verified"""
+    al = ", ".join(aliases) if isinstance(aliases, (list, tuple)) else str(aliases)
+    return ("---\ntitle: %s\naliases: [%s]\nupdated: %s\n---\n\n"
+            % (title, al, datetime.date.today().isoformat()))
+
+def conn():
+    DB.parent.mkdir(parents=True, exist_ok=True); db = sqlite3.connect(DB)
+    db.executescript("""CREATE TABLE IF NOT EXISTS entries(
+      id INTEGER PRIMARY KEY, path TEXT UNIQUE, kind TEXT, title TEXT, summary TEXT,
+      category TEXT, verified TEXT, status TEXT, source TEXT, body TEXT, ident TEXT);
+      CREATE TABLE IF NOT EXISTS aliases(entry_id INT, alias TEXT);""")
+    return db
+def row_of(p):
+    r = rel(p); m, b = parse(p)
+    return dict(path=r, kind="leaf", title=str(m.get("title") or p.stem), summary=summary(b),
+                category=str(pathlib.Path(r).parent) if str(pathlib.Path(r).parent) != "." else "",
+                verified=str(m.get("updated", "")), status="",
+                source=str(m.get("source", "")), body=b, aliases=m.get("aliases") or [], ident=ident_of(r) or "")
+def upsert(p):
+    db = conn(); x = row_of(p)
+    db.execute("""INSERT INTO entries(path,kind,title,summary,category,verified,status,source,body,ident)
+      VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET title=excluded.title,summary=excluded.summary,
+      category=excluded.category,verified=excluded.verified,status=excluded.status,source=excluded.source,
+      body=excluded.body,ident=excluded.ident""",
+      (x["path"], x["kind"], x["title"], x["summary"], x["category"], x["verified"], x["status"], x["source"], x["body"], x["ident"]))
+    eid = db.execute("SELECT id FROM entries WHERE path=?", (x["path"],)).fetchone()[0]
+    db.execute("DELETE FROM aliases WHERE entry_id=?", (eid,))
+    for a in x["aliases"]: db.execute("INSERT INTO aliases VALUES(?,?)", (eid, str(a)))
+    db.commit(); db.close()
+def drop_row(r):
+    db = conn(); db.execute("DELETE FROM aliases WHERE entry_id IN (SELECT id FROM entries WHERE path=?)", (r,))
+    db.execute("DELETE FROM entries WHERE path=?", (r,)); db.commit(); db.close()
+def index():
+    db = conn(); db.execute("DELETE FROM aliases"); db.execute("DELETE FROM entries"); n = 0
+    for p in entries():
+        x = row_of(p)
+        cur = db.execute("""INSERT OR REPLACE INTO entries(path,kind,title,summary,category,verified,status,source,body,ident)
+          VALUES(?,?,?,?,?,?,?,?,?,?)""", (x["path"], x["kind"], x["title"], x["summary"], x["category"],
+          x["verified"], x["status"], x["source"], x["body"], x["ident"]))
+        for a in x["aliases"]: db.execute("INSERT INTO aliases VALUES(?,?)", (cur.lastrowid, str(a)))
+        n += 1
+    db.commit(); db.close()
+    print("indexed %d entries -> %s" % (n, DB)); return n
+
+def git(*a): return subprocess.run(["git", "-C", str(KB)] + list(a), capture_output=True, text=True)
+def commit(msg): git("add", "-A"); return git("commit", "-qm", msg).returncode == 0
+def push(quiet=False):
+    r = git("push", "-q", "origin", "HEAD")
+    if r.returncode == 0:
+        if not quiet: print("pushed -> origin")
+    else:
+        t = (r.stderr or "").strip().splitlines()
+        print("push 失败（本地已提交，稍后 kb push 重试）：" + (t[-1][:120] if t else ""))
+    return r.returncode
+
+def do_id(path):
+    r = str(pathlib.Path(path))
+    i = ident_of(r)
+    if not i: print("路径的段名前两位必须是 36 进制：%s" % path); return 1
+    print(i); return 0
+
+def do_get(ident):
+    p = id2path(ident)
+    if not p: print("没有这个 id：%s" % ident); return 1
+    if p.is_dir():
+        print("（这是目录 id，下面是它的子项）")
+        return do_ls(ident)
+    print(strip_meta(p.read_text(encoding="utf-8"))); return 0
+
+def do_ls(ident):
+    p = id2path(ident)
+    if not p: print("没有这个 id：%s" % ident); return 1
+    d = p if p.is_dir() else p.parent
+    rows = []
+    for x in sorted(d.iterdir()):
+        if x.name == TPL or x.name.startswith(".") or (x.is_file() and not x.name.endswith(E)): continue
+        i = ident_of(rel(x)) or "??"
+        if x.is_dir(): rows.append((i, rel(x) + "/", "（目录）", ""))
+        else:
+            m, b = parse(x); rows.append((i, rel(x), str(m.get("title") or x.stem), summary(b)))
+    for i, r, t, s in rows: print("%s  %-46s %s" % (i, r, t))
+    if not rows: print("（空）")
+    return 0
+
+def do_tree(ident=None, depth=3):
+    root = id2path(ident) if ident else KB
+    if root is None: print("没有这个 id：%s" % ident); return 1
+    base = root if root.is_dir() else root.parent
+    def walk(d, lvl):
+        if lvl > depth: return
+        for x in sorted(d.iterdir()):
+            if x.name == TPL or x.name.startswith(".") or (x.is_file() and not x.name.endswith(E)): continue
+            i = ident_of(rel(x)) or "??"
+            if x.is_dir():
+                print("  " * (lvl - 1) + "%s  %s/" % (i[-2:], x.name))
+                walk(x, lvl + 1)
+            else:
+                m, _ = parse(x)
+                print("  " * (lvl - 1) + "%s  %s  — %s" % (i[-2:], x.name, str(m.get("title") or "")))
+    print("%s/  (%s)" % (rel(base) if base != KB else "~", ident or "-"))
+    walk(base, 1)
+    return 0
+
+def do_add(draft, force=False, a=()):
+    p = pathlib.Path(draft)
+    if not p.exists(): print("草稿不存在：%s" % draft); return 1
+    meta, body = parse(p)                     # 草稿可以带 front matter，只当兜底
+    def opt(name):
+        return a[a.index(name) + 1] if name in a else None
+    body = body.strip()
+    cat = (opt("--category") or str(meta.get("category", ""))).strip().strip("/")
+    title = opt("--title") or str(meta.get("title") or "")
+    aliases = (opt("--alias").split(",") if opt("--alias") else (meta.get("aliases") or []))
+    source = opt("--source") or str(meta.get("source") or "")
+    missing = [k for k, v in (("category", cat), ("title", title), ("aliases", aliases)) if not v]
+    if missing:
+        print("缺元数据：" + "、".join(missing) + "（用 --category/--title/--alias 给；front matter 由 kb 生成）")
+        return 1
+    text = make_fm(title, aliases) + body + "\n"
+    m2, _ = parse_text(text)
+    problems = check(m2, text)                # 检查跑在生成之后：检查的就是最终要落盘的内容
+    if problems and not force:
+        print("写入被拦下 —— 需要你【两次确认】：")
+        for x in problems: print("  -", x)
+        print("流程：先把这些连同条目原文给用户看 → 用户确认 → 再加 --force 重跑")
+        return 2
+    d = KB
+    for part in [x for x in cat.split("/") if x]:
+        want = part[3:] if PFX.match(part) else part
+        found = None
+        if d.exists():
+            for x in sorted(d.iterdir()):
+                if x.is_dir() and (x.name == part or (PFX.match(x.name) and x.name[3:] == want)):
+                    found = x; break
+        if found:
+            d = found
+        else:
+            d.mkdir(parents=True, exist_ok=True)
+            slot = free_slot(d)
+            d = d / (slot + "-" + want); d.mkdir(parents=True, exist_ok=True)
+            print("新建目录 %s" % rel(d))
+    slot = free_slot(d)
+    if not slot: print("该层前缀已用尽（1296 个）"); return 1
+    name = re.sub(r"[\\/\x00-\x1f]", "-", str(title or p.stem)).strip()
+    dest = d / (slot + "-" + name + E)
+    dest.write_text(text, encoding="utf-8")
+    print("收编 %s → id %s" % (rel(dest), ident_of(rel(dest))))
+    upsert(dest); commit("kb: add " + str(title)); push()
+    return 0
+
+
+def do_update(ident, draft, to=None, a=()):
+    p = id2path(ident)
+    if not p: print("没有这个 id：%s" % ident); return 1
+    src = pathlib.Path(draft)
+    if not src.exists(): print("草稿不存在：%s" % draft); return 1
+    cur, _ = parse(p)
+    body = parse(src)[1].strip()
+    def opt(name):
+        return a[a.index(name) + 1] if name in a else None
+    title = opt("--title") or str(cur.get("title") or "")
+    aliases = (opt("--alias").split(",") if opt("--alias") else (cur.get("aliases") or []))
+    source = opt("--source") or str(cur.get("source") or "")
+    cat = str(cur.get("category") or "")
+    text = make_fm(title, aliases) + body + "\n"
+    meta, _ = parse_text(text)
+    problems = check(meta, text)
+    if problems and "--force" not in sys.argv:
+        print("写入被拦下 —— 需要你【两次确认】：")
+        for x in problems: print("  -", x)
+        return 2
+    old = rel(p)
+    if to:
+        tgt = id2path(to)
+        if not tgt or not tgt.is_dir(): print("目标目录不存在：%s" % to); return 1
+        slot = free_slot(tgt)
+        newp = tgt / (slot + "-" + p.name[2:].lstrip("-"))
+        if newp.exists(): print("目标已存在：%s" % rel(newp)); return 1
+        if git("mv", old, rel(newp)).returncode != 0: p.rename(newp)
+        p = newp
+    p.write_text(text, encoding="utf-8")
+    if rel(p) != old: drop_row(old)
+    print("更新 %s（id %s）" % (rel(p), ident_of(rel(p))))
+    upsert(p); commit("kb: update " + str(meta.get("title"))); push()
+    return 0
+
+def do_move(ident, target):
+    p = id2path(ident)
+    if not p: print("没有这个 id：%s" % ident); return 1
+    tgt = id2path(target)
+    if not tgt or not tgt.is_dir(): print("目标目录不存在：%s" % target); return 1
+    if str(p.parent) == str(tgt): print("已经在目标目录里了"); return 0
+    slot = free_slot(tgt)
+    newp = tgt / (slot + "-" + p.name[2:].lstrip("-"))
+    if newp.exists(): print("目标已存在：%s" % rel(newp)); return 1
+    if git("mv", rel(p), rel(newp)).returncode != 0: p.rename(newp)
+    for q in entries():
+        if p.name in str(q) or True: pass
+    print("移动 %s → %s（子树内所有条目的 id 只需改这一段前缀，文件名不动）" % (rel(p), rel(newp)))
+    db = conn(); db.execute("DELETE FROM aliases"); db.execute("DELETE FROM entries"); db.commit(); db.close(); index()
+    commit("kb: move " + rel(p)); push()
+    return 0
+
+def do_delete(ident, force=False):
+    p = id2path(ident)
+    if not p: print("没有这个 id：%s" % ident); return 1
+    if not force: print("删除是破坏性操作：确认后加 --force 重跑（%s）" % rel(p)); return 1
+    if p.is_dir():
+        if any(p.iterdir()): print("目录非空，先删里面：%s" % rel(p)); return 1
+        p.rmdir()
+    else:
+        if git("rm", "-q", rel(p)).returncode != 0: p.unlink()
+        drop_row(rel(p))
+    print("已删除 %s（别人 id 不变）" % rel(p)); commit("kb: delete " + rel(p)); push(); return 0
+
+def do_search(q, limit=5, as_json=False):
+    db = conn(); db.row_factory = sqlite3.Row
+    sql = "SELECT e.*, GROUP_CONCAT(DISTINCT a.alias) al FROM entries e LEFT JOIN aliases a ON a.entry_id=e.id"
+    where, args = [], []
+    if q:
+        where.append("(e.title LIKE ? OR e.summary LIKE ? OR e.body LIKE ? OR a.alias LIKE ?)"); args += ["%" + q + "%"] * 4
+    if where: sql += " WHERE " + " AND ".join(where)
+    if q:
+        sql += (" GROUP BY e.id ORDER BY MAX(CASE WHEN a.alias LIKE ? THEN 3 WHEN e.title LIKE ? THEN 2 "
+                "WHEN e.summary LIKE ? THEN 1 ELSE 0 END) DESC, e.ident LIMIT ?")
+        args += ["%" + q + "%"] * 3 + [limit]
+    else:
+        sql += " GROUP BY e.id ORDER BY e.ident LIMIT ?"; args.append(limit)
+    out = [dict(x) for x in db.execute(sql, args)]; db.close()
+    if as_json: print(json.dumps(out, ensure_ascii=False, indent=1)); return 0
+    if not out: print("no hit"); return 0
+    for x in out:
+        print("[%s] %s\n    %s | aliases: %s | updated: %s | %s" % (x["ident"], x["path"], x["title"], x["al"] or "-", x["verified"] or "-", x["summary"]))
+    return 0
+
+def do_lint(days=180):
+    ok = warn = 0
+    for p in entries():
+        r = rel(p); m, b = parse(p); text = p.read_text(encoding="utf-8", errors="replace"); msgs = []
+        for k in ("title", "aliases", "updated"):
+            v = m.get(k)
+            if not (v if isinstance(v, list) else str(v or "").strip()): msgs.append("缺 " + k)
+        if len(text.encode()) > 10240: msgs.append("超过 10 KB")
+        if "**" in text or "__" in text: msgs.append("有加粗标记")
+        if not ID2.match(p.name): msgs.append("文件名缺前缀")
+        if msgs: warn += 1; print("warn  %-42s %s" % (r, "；".join(msgs[:4])))
+        else: ok += 1; print("ok    %s" % r)
+    dr = [rel(x) for x in drafts()]
+    if dr: print("未收编的草稿（.md）：" + "、".join(dr[:10]))
+    print("--- 合计 %d：ok %d / warn %d；只读检查" % (ok + warn, ok, warn))
+    return 0
+
+
+def do_dup():
+    db = conn(); seen = {}
+    for p, t, a in db.execute("SELECT e.path, e.title, GROUP_CONCAT(a.alias) FROM entries e LEFT JOIN aliases a ON a.entry_id=e.id GROUP BY e.id"):
+        for k in {t} | set((a or "").split(",")):
+            k = (k or "").strip().lower()
+            if not k: continue
+            if k in seen and seen[k] != p: print("dup: %s -> %s / %s" % (k, seen[k], p))
+            seen[k] = p
+    db.close(); return 0
+
+def sync():
+    git("pull", "--rebase", "-q"); index(); push(); return 0
+
+def main(a):
+    if not DB.exists(): index()
+    cmd = a[1] if len(a) > 1 else "help"; args = a[2:]
+    if cmd in ("help", "-h", "--help"): print(USAGE); return 0
+    if cmd == "id": return do_id(args[0] if args else "")
+    if cmd == "get": return do_get(args[0] if args else "")
+    if cmd == "ls": return do_ls(args[0] if args else "")
+    if cmd == "tree":
+        d = 3
+        if "--depth" in a: d = int(a[a.index("--depth") + 1])
+        pos = [x for x in args if not x.startswith("--")]
+        return do_tree(pos[0] if pos else None, d)
+    if cmd == "add": return do_add(args[0] if args else "", force=("--force" in a), a=a)
+    if cmd == "update":
+        to = a[a.index("--to") + 1] if "--to" in a else None
+        rest = [x for x in args if not x.startswith("--") and x != to]
+        return do_update(rest[0] if rest else "", rest[1] if len(rest) > 1 else "", to, a)
+    if cmd == "move": return do_move(args[0] if args else "", args[1] if len(args) > 1 else "")
+    if cmd == "delete": return do_delete(args[0] if args else "", force=("--force" in a or "--yes" in a))
+    if cmd == "index": return index() and 0
+    if cmd == "search": return do_search(args[0] if args else "", as_json=("--json" in a))
+    if cmd == "lint": return do_lint()
+    if cmd == "dup": return do_dup()
+    if cmd == "push": return push() or 0
+    if cmd == "sync": return sync()
+    print(USAGE); return 2
+
+if __name__ == "__main__": sys.exit(main(sys.argv))

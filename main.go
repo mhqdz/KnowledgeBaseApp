@@ -356,7 +356,10 @@ func upsert(p string) {
 		return
 	}
 	var id int64
-	db.QueryRow("SELECT id FROM entries WHERE path=?", r).Scan(&id)   // 不能用 LastInsertId：upsert 命中冲突时它不会更新
+	if err := db.QueryRow("SELECT id FROM entries WHERE path=?", r).Scan(&id); err != nil || id == 0 {
+		fmt.Printf("  !! 取条目 id 失败（path=%s）：%v —— tags 未写入，请跑 kb index 重建\n", r, err)
+		return
+	}
 	db.Exec("DELETE FROM tags WHERE entry_id=?", id)
 	for _, t := range strings.Split(metaTags(m), ",") {
 		if s := strings.TrimSpace(t); s != "" {
@@ -414,7 +417,22 @@ func git(args ...string) (string, int) {
 	return string(b), code
 }
 
-func commit(msg string) { git("add", "-A"); git("commit", "-qm", msg) }
+func commit(msg string) {
+	git("add", "-A")
+	if out, code := git("commit", "-qm", msg); code != 0 {
+		low := strings.ToLower(out)
+		if !strings.Contains(low, "nothing to commit") && !strings.Contains(low, "无文件要提交") {
+			fmt.Println("  !! git commit 失败：" + strings.TrimSpace(firstLine(out)))
+		}
+	}
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
 
 func push(quiet bool) int {
 	out, code := git("push", "-q", "origin", "HEAD")
@@ -739,7 +757,10 @@ func doUpdate(id, draft, to string, args []string) int {
 		}
 		p = np
 	}
-	os.WriteFile(p, []byte(text), 0o644)
+	if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
+		fmt.Println("  !! 写文件失败：" + err.Error())
+		return 1
+	}
 	if rel(p) != oldRel {
 		dropRow(oldRel)
 	}
@@ -954,6 +975,37 @@ func doLint() int {
 			fmt.Printf("ok    %s\n", rel(p))
 		}
 	}
+	// DB 与文件一致性：条目数 + 抽 3 条比对 tags
+	db := openDB()
+	var rowsN int
+	db.QueryRow("SELECT COUNT(*) FROM entries").Scan(&rowsN)
+	if rowsN != ok+warn {
+		warn++
+		fmt.Printf("warn  %-42s 数据库与文件不一致：DB %d 行 / 文件 %d 条 —— 跑 kb index 重建\n", "(全局)", rowsN, ok+warn)
+	}
+	checked := 0
+	for _, p := range walkEntries() {
+		if checked >= 3 {
+			break
+		}
+		r := rel(p)
+		m, _, err := readEntry(p)
+		if err != nil {
+			continue
+		}
+		var dbTags, dbIdent string
+		if err := db.QueryRow("SELECT tags,ident FROM entries WHERE path=?", r).Scan(&dbTags, &dbIdent); err != nil {
+			warn++
+			fmt.Printf("warn  %-42s 数据库里查不到这一条 —— 跑 kb index 重建\n", r)
+			continue
+		}
+		if strings.TrimSpace(dbTags) != strings.TrimSpace(metaTags(m)) || dbIdent != mustID(r) {
+			warn++
+			fmt.Printf("warn  %-42s 数据库与文件字段不一致（tags/ident）—— 跑 kb index 重建\n", r)
+		}
+		checked++
+	}
+	db.Close()
 	if dr := walkDrafts(); len(dr) > 0 {
 		var rs []string
 		for _, x := range dr {

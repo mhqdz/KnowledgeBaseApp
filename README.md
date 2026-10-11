@@ -11,7 +11,9 @@
 ```bash
 export PATH=$PATH:/usr/local/go/bin
 cd ~/Workspace/KnowledgeBase
-go build -o ~/.local/bin/kb .        # 依赖 modernc.org/sqlite（纯 Go，无 cgo）
+COMMIT=$(git rev-parse --short HEAD)
+go build -ldflags "-X main.buildVersion=$COMMIT" -o ~/.local/bin/kb .   # 依赖 modernc.org/sqlite（纯 Go，无 cgo）
+kb version                                                             # 应打印出这个 commit
 # 拉不到依赖时：go env -w GOPROXY=https://goproxy.cn,direct
 ```
 
@@ -23,6 +25,8 @@ kb tree                 # 看结构
 kb add 草稿.md --category 00-本机 --title "标题" --tags "词1,词2"   # 新增：元数据走参数
 kb update <id> 草稿.md  # 修改；搬家：kb move <id> <目标目录id>
 kb lint                 # 体检（只读）；kb index 重建缓存
+kb version              # 看装的是哪一版（构建时嵌入的 commit）
+# 注：收编成功后草稿会被自动删除（需要时用 kb get <id> 取回全文重建）
 ```
 
 详细规则见知识库：`kb get 010202`（写入约定）、`kb get 010201`（设计逻辑）、`kb get 010203`（模板）

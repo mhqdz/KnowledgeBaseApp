@@ -19,6 +19,8 @@ import (
 
 const b36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
+var buildVersion = "dev"
+
 var (
 	E       = ".kbx"
 	D       = ".md"
@@ -39,6 +41,7 @@ var (
   kb update <id> <草稿.md> [--to <目录id>] [--title X] [--tags a,b]   改内容；带 --to 则搬家
   kb move <id> <目标目录id>         移动一个条目或一整棵子树
   kb delete <id> --force           删除
+  kb version                       打印版本（构建时的 commit）
   kb index / lint / push / sync / help
 
 front matter 由 kb 生成，字段只有 title / tags / updated。`
@@ -331,7 +334,7 @@ func openDB() *sql.DB {
 	}
 	db.Exec(`CREATE TABLE IF NOT EXISTS entries(
       id INTEGER PRIMARY KEY, path TEXT UNIQUE, kind TEXT, title TEXT, summary TEXT,
-      category TEXT, updated TEXT, tags TEXT, body TEXT, ident TEXT);
+      category TEXT, updated TEXT, tags TEXT, ident TEXT);
       CREATE TABLE IF NOT EXISTS tags(entry_id INT, tag TEXT);`)
 	for _, col := range []string{"updated TEXT", "tags TEXT", "ident TEXT"} {
 		db.Exec("ALTER TABLE entries ADD COLUMN " + col)   // 旧库补列；已存在则报错被忽略
@@ -345,9 +348,9 @@ func upsert(p string) {
 	m, body, _ := readEntry(p)
 	db := openDB()
 	defer db.Close()
-	res, err := db.Exec(`INSERT INTO entries(path,kind,title,summary,category,updated,tags,body,ident)
-      VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET title=excluded.title,summary=excluded.summary,
-      updated=excluded.updated,tags=excluded.tags,body=excluded.body,ident=excluded.ident`,
+	res, err := db.Exec(`INSERT INTO entries(path,kind,title,summary,category,updated,tags,ident)
+      VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET title=excluded.title,summary=excluded.summary,
+      updated=excluded.updated,tags=excluded.tags,ident=excluded.ident`,
 		r, "leaf", m["title"], summary(body), filepath.Dir(r), m["updated"], metaTags(m), body, mustID(r))
 	if err != nil {
 		return
@@ -379,8 +382,8 @@ func rebuild() {
 	for _, p := range walkEntries() {
 		m, body, _ := readEntry(p)
 		r := rel(p)
-		res, err := db.Exec(`INSERT INTO entries(path,kind,title,summary,category,updated,tags,body,ident)
-          VALUES(?,?,?,?,?,?,?,?,?)`, r, "leaf", m["title"], summary(body), filepath.Dir(r), m["updated"], metaTags(m), body, mustID(r))
+		res, err := db.Exec(`INSERT INTO entries(path,kind,title,summary,category,updated,tags,ident)
+          VALUES(?,?,?,?,?,?,?,?)`, r, "leaf", m["title"], summary(body), filepath.Dir(r), m["updated"], metaTags(m), mustID(r))
 		if err != nil {
 			fmt.Println("  !! 写入数据库失败：" + err.Error())
 			continue
@@ -651,6 +654,8 @@ func doAdd(draft string, force bool, args []string) int {
 		return 1
 	}
 	fmt.Printf("收编 %s → id %s\n", rel(dest), mustID(rel(dest)))
+	os.Remove(draft)
+	fmt.Println("草稿已删除（需要时用 kb get " + mustID(rel(dest)) + " 重建）")
 	upsert(dest)
 	commit("kb: add " + title)
 	push(false)
@@ -722,6 +727,8 @@ func doUpdate(id, draft, to string, args []string) int {
 		dropRow(oldRel)
 	}
 	fmt.Printf("更新 %s（id %s）\n", rel(p), mustID(rel(p)))
+	os.Remove(draft)
+	fmt.Println("草稿已删除（需要时用 kb get " + mustID(rel(p)) + " 重建）")
 	upsert(p)
 	commit("kb: update " + title)
 	push(false)
@@ -796,7 +803,7 @@ func doDelete(id string, force bool) int {
 func doSearch(q string, limit int, asJSON bool) int {
 	db := openDB()
 	defer db.Close()
-	rows, err := db.Query(`SELECT path,title,summary,updated,tags,ident,body FROM entries`)
+	rows, err := db.Query(`SELECT path,title,summary,updated,tags,ident FROM entries`)
 	if err != nil {
 		fmt.Println("no hit")
 		return 0
@@ -807,14 +814,14 @@ func doSearch(q string, limit int, asJSON bool) int {
 		matched      int
 		path, title  string
 		sum, upd, tg string
-		ident, body  string
+		ident        string
 	}
 	tm := queryTerms(q)
 	lq := strings.ToLower(strings.TrimSpace(q))
 	var hits []hit
 	for rows.Next() {
 		var h hit
-		rows.Scan(&h.path, &h.title, &h.sum, &h.upd, &h.tg, &h.ident, &h.body)
+		rows.Scan(&h.path, &h.title, &h.sum, &h.upd, &h.tg, &h.ident)
 		if q == "" {
 			h.score, h.matched = 1, 1
 			hits = append(hits, h)
@@ -823,12 +830,11 @@ func doSearch(q string, limit int, asJSON bool) int {
 		tg := strings.ToLower(h.tg)
 		ti := strings.ToLower(h.title)
 		sm := strings.ToLower(h.sum)
-		bd := strings.ToLower(h.body)
 		score, matched := 0, 0
 		// 整串子串命中（老行为）也算一部分分
 		if strings.Contains(tg, lq) || strings.Contains(ti, lq) {
 			score += 6
-		} else if strings.Contains(sm, lq) || strings.Contains(bd, lq) {
+		} else if strings.Contains(sm, lq) {
 			score += 2
 		}
 		for _, t := range tm {
@@ -837,7 +843,7 @@ func doSearch(q string, limit int, asJSON bool) int {
 				got = 3
 			} else if strings.Contains(ti, t) {
 				got = 2
-			} else if strings.Contains(sm, t) || strings.Contains(bd, t) {
+			} else if strings.Contains(sm, t) {
 				got = 1
 			} else { // 近似：tags/标题里有没有编辑距离很近的
 				for _, et := range splitTags(tg + "," + ti) {
@@ -973,6 +979,8 @@ func main() {
 		}
 	}
 	switch cmd {
+	case "version", "-v", "--version":
+		fmt.Println("kb " + buildVersion)
 	case "help", "-h", "--help":
 		fmt.Println(usageTx)
 	case "id":

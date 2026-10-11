@@ -39,7 +39,6 @@ var (
   kb update <id> <草稿.md> [--to <目录id>] [--title X] [--tags a,b]   改内容；带 --to 则搬家
   kb move <id> <目标目录id>         移动一个条目或一整棵子树
   kb delete <id> --force           删除
-  kb retag                         把库里所有条目的 front matter 重写为 title/tags/updated
   kb index / lint / push / sync / help
 
 front matter 由 kb 生成，字段只有 title / tags / updated。`
@@ -193,6 +192,109 @@ func summary(body string) string {
 		}
 	}
 	return ""
+}
+
+
+// ---------- 相似 tag 检查 ----------
+func editDist(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	prev := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		cur := make([]int, len(rb)+1)
+		cur[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			m := prev[j] + 1
+			if cur[j-1]+1 < m {
+				m = cur[j-1] + 1
+			}
+			if prev[j-1]+cost < m {
+				m = prev[j-1] + cost
+			}
+			cur[j] = m
+		}
+		prev = cur
+	}
+	return prev[len(rb)]
+}
+
+func splitTags(s string) []string {
+	out := []string{}
+	for _, t := range strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == '，' || r == '、' || r == ';' || r == '；' || r == ' '
+	}) {
+		if t = strings.TrimSpace(t); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func existingTags() []string {
+	set := map[string]bool{}
+	for _, p := range walkEntries() {
+		m, _, _ := readEntry(p)
+		for _, t := range splitTags(m["tags"]) {
+			set[t] = true
+		}
+	}
+	out := []string{}
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// 新 tags 里有没有"像已有 tag"的（拼写近似 / 互相包含）
+func similarTagWarnings(tags string) []string {
+	ex := existingTags()
+	var out []string
+	for _, nt := range splitTags(tags) {
+		l1 := strings.ToLower(nt)
+		for _, et := range ex {
+			l2 := strings.ToLower(et)
+			if l1 == l2 {
+				continue
+			}
+			d := editDist(l1, l2)
+			n := len([]rune(l1))
+			if m := len([]rune(l2)); m > n {
+				n = m
+			}
+			hit := strings.Contains(l1, l2) || strings.Contains(l2, l1)
+			if !hit {
+				if n >= 4 && d*3 <= n {
+					hit = true
+				} else if n < 4 && d <= 1 {
+					hit = true
+				}
+			}
+			if hit {
+				out = append(out, fmt.Sprintf("新 tag 与已有 tag 相似：%q ~ %q（是否改用已有的 %q？）", nt, et, et))
+			}
+		}
+	}
+	return out
+}
+
+// ---------- 检索分词 ----------
+func queryTerms(q string) []string {
+	out := []string{}
+	for _, t := range strings.FieldsFunc(q, func(r rune) bool {
+		return r == ' ' || r == ',' || r == '，' || r == '、' || r == '/' || r == '|' || r == ';' || r == '；'
+	}) {
+		if t = strings.TrimSpace(t); t != "" {
+			out = append(out, strings.ToLower(t))
+		}
+	}
+	return out
 }
 
 func checkProblems(m Meta, text string) []string {
@@ -515,7 +617,8 @@ func doAdd(draft string, force bool, args []string) int {
 		return 1
 	}
 	text := makeFM(title, tags) + strings.TrimSpace(body) + "\n"
-	if probs := checkProblems(parse2(text), text); len(probs) > 0 && !force {
+	probs := append(checkProblems(parse2(text), text), similarTagWarnings(tags)...)
+	if len(probs) > 0 && !force {
 		fmt.Println("写入被拦下 —— 需要你【两次确认】：")
 		for _, x := range probs {
 			fmt.Println("  - " + x)
@@ -566,7 +669,8 @@ func doUpdate(id, draft, to string, args []string) int {
 		tags = metaTags(cur)
 	}
 	text := makeFM(title, tags) + strings.TrimSpace(body) + "\n"
-	if probs := checkProblems(parse2(text), text); len(probs) > 0 && !hasFlag(args, "--force") {
+	probs := append(checkProblems(parse2(text), text), similarTagWarnings(tags)...)
+	if len(probs) > 0 && !hasFlag(args, "--force") {
 		fmt.Println("写入被拦下 —— 需要你【两次确认】：")
 		for _, x := range probs {
 			fmt.Println("  - " + x)
@@ -683,34 +787,63 @@ func doSearch(q string, limit int, asJSON bool) int {
 	defer rows.Close()
 	type hit struct {
 		score        int
+		matched      int
 		path, title  string
 		sum, upd, tg string
 		ident, body  string
 	}
+	tm := queryTerms(q)
+	lq := strings.ToLower(strings.TrimSpace(q))
 	var hits []hit
-	lq := strings.ToLower(q)
 	for rows.Next() {
 		var h hit
 		rows.Scan(&h.path, &h.title, &h.sum, &h.upd, &h.tg, &h.ident, &h.body)
 		if q == "" {
-			h.score = 1
-		} else {
-			switch {
-			case strings.Contains(strings.ToLower(h.tg), lq):
-				h.score = 3
-			case strings.Contains(strings.ToLower(h.title), lq):
-				h.score = 2
-			case strings.Contains(strings.ToLower(h.sum), lq):
-				h.score = 1
-			case strings.Contains(strings.ToLower(h.body), lq):
-				h.score = 1
+			h.score, h.matched = 1, 1
+			hits = append(hits, h)
+			continue
+		}
+		tg := strings.ToLower(h.tg)
+		ti := strings.ToLower(h.title)
+		sm := strings.ToLower(h.sum)
+		bd := strings.ToLower(h.body)
+		score, matched := 0, 0
+		// 整串子串命中（老行为）也算一部分分
+		if strings.Contains(tg, lq) || strings.Contains(ti, lq) {
+			score += 6
+		} else if strings.Contains(sm, lq) || strings.Contains(bd, lq) {
+			score += 2
+		}
+		for _, t := range tm {
+			got := 0
+			if strings.Contains(tg, t) {
+				got = 3
+			} else if strings.Contains(ti, t) {
+				got = 2
+			} else if strings.Contains(sm, t) || strings.Contains(bd, t) {
+				got = 1
+			} else { // 近似：tags/标题里有没有编辑距离很近的
+				for _, et := range splitTags(tg + "," + ti) {
+					if d := editDist(et, t); d > 0 && (d <= 1 || (len([]rune(t)) >= 4 && d*3 <= len([]rune(t)))) {
+						got = 1
+						break
+					}
+				}
+			}
+			if got > 0 {
+				score += got
+				matched++
 			}
 		}
-		if h.score > 0 {
+		if matched > 0 {
+			h.score, h.matched = score, matched
 			hits = append(hits, h)
 		}
 	}
 	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].matched != hits[j].matched {
+			return hits[i].matched > hits[j].matched
+		}
 		if hits[i].score != hits[j].score {
 			return hits[i].score > hits[j].score
 		}
@@ -733,11 +866,10 @@ func doSearch(q string, limit int, asJSON bool) int {
 		return 0
 	}
 	for _, h := range hits {
-		tg := h.tg
+		tg, up := h.tg, h.upd
 		if tg == "" {
 			tg = "-"
 		}
-		up := h.upd
 		if up == "" {
 			up = "-"
 		}
@@ -789,21 +921,6 @@ func doLint() int {
 	return 0
 }
 
-// retag：把所有条目的 front matter 重写为 title/tags/updated（aliases → tags 迁移）
-func doRetag() int {
-	n := 0
-	for _, p := range walkEntries() {
-		m, body, _ := readEntry(p)
-		os.WriteFile(p, []byte(makeFM(m["title"], metaTags(m))+strings.TrimSpace(body)+"\n"), 0o644)
-		n++
-	}
-	rebuild()
-	commit("kb: front matter 重写为 title/tags/updated（aliases → tags）")
-	push(false)
-	fmt.Printf("retag: 重写 %d 条\n", n)
-	return 0
-}
-
 func syncCmd() int {
 	git("pull", "--rebase", "-q")
 	rebuild()
@@ -829,7 +946,7 @@ func main() {
 	}
 	rest := args[1:]
 	// 自愈：数据库为空但磁盘有条目（首次切换或表结构迁移后）→ 自动重建
-	if cmd != "index" && cmd != "retag" {
+	if cmd != "index" {
 		db := openDB()
 		var n int
 		db.QueryRow("SELECT COUNT(*) FROM entries").Scan(&n)
@@ -891,8 +1008,6 @@ func main() {
 		os.Exit(doDelete(arg(rest, 0), hasFlag(args, "--force") || hasFlag(args, "--yes")))
 	case "index":
 		rebuild()
-	case "retag":
-		os.Exit(doRetag())
 	case "lint":
 		os.Exit(doLint())
 	case "search":

@@ -944,6 +944,7 @@ func doSearch(q string, limit int, asJSON bool) int {
 }
 
 func doLint() int {
+	fileN := len(walkEntries())
 	ok, warn := 0, 0
 	for _, p := range walkEntries() {
 		m, _, _ := readEntry(p)
@@ -979,9 +980,9 @@ func doLint() int {
 	db := openDB()
 	var rowsN int
 	db.QueryRow("SELECT COUNT(*) FROM entries").Scan(&rowsN)
-	if rowsN != ok+warn {
+	if rowsN != fileN {
 		warn++
-		fmt.Printf("warn  %-42s 数据库与文件不一致：DB %d 行 / 文件 %d 条 —— 跑 kb index 重建\n", "(全局)", rowsN, ok+warn)
+		fmt.Printf("warn  %-42s 数据库与文件不一致：DB %d 行 / 文件 %d 条 —— 跑 kb index 重建\n", "(全局)", rowsN, fileN)
 	}
 	checked := 0
 	for _, p := range walkEntries() {
@@ -1013,7 +1014,7 @@ func doLint() int {
 		}
 		fmt.Println("未收编的草稿（.md）：" + strings.Join(rs, "、"))
 	}
-	fmt.Printf("--- 合计 %d：ok %d / warn %d；只读检查\n", ok+warn, ok, warn)
+	fmt.Printf("--- 条目 %d：ok %d / warn %d（warn 含全局检查）；只读\n", fileN, ok, warn)
 	return 0
 }
 
@@ -1055,6 +1056,19 @@ func main() {
 	case "version", "-v", "--version":
 		fmt.Println("kb " + buildVersion)
 	case "help", "-h", "--help":
+		if len(rest) > 0 {
+			hit := false
+			for _, l := range strings.Split(usageTx, "\n") {
+				if strings.Contains(l, rest[0]) {
+					fmt.Println(l)
+					hit = true
+				}
+			}
+			if !hit {
+				fmt.Println("没有这个命令；不带参数看全部用法：kb help")
+			}
+			return
+		}
 		fmt.Println(usageTx)
 	case "id":
 		os.Exit(doID(arg(rest, 0)))

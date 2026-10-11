@@ -4,6 +4,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -39,7 +40,7 @@ var (
   kb move <id> <目标目录id>         移动一个条目或一整棵子树
   kb delete <id> --force           删除
   kb retag                         把库里所有条目的 front matter 重写为 title/tags/updated
-  kb index / lint / dup / push / sync / help
+  kb index / lint / push / sync / help
 
 front matter 由 kb 生成，字段只有 title / tags / updated。`
 )
@@ -132,22 +133,28 @@ func walkDrafts() []string {
 }
 
 func idToPath(id string) string {
-	for _, p := range walkEntries() {
-		if v, ok := identOf(rel(p)); ok && v == id {
-			return p
-		}
-	}
-	var found string
+	res := ""
 	filepath.WalkDir(kbDir, func(p string, d os.DirEntry, err error) error {
-		if err != nil || !d.IsDir() || d.Name() == ".git" {
+		if err != nil {
 			return nil
 		}
-		if v, ok := identOf(rel(p)); ok && v == id {
-			found = p
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			if v, ok := identOf(rel(p)); ok && v == id {
+				res = p
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), E) && d.Name() != TPL {
+			if v, ok := identOf(rel(p)); ok && v == id {
+				res = p
+			}
 		}
 		return nil
 	})
-	return found
+	return res
 }
 
 func freeSlot(dir string) string {
@@ -214,10 +221,11 @@ func openDB() *sql.DB {
 	db.Exec(`CREATE TABLE IF NOT EXISTS entries(
       id INTEGER PRIMARY KEY, path TEXT UNIQUE, kind TEXT, title TEXT, summary TEXT,
       category TEXT, updated TEXT, tags TEXT, body TEXT, ident TEXT);
-      CREATE TABLE IF NOT EXISTS aliases(entry_id INT, alias TEXT);`)
+      CREATE TABLE IF NOT EXISTS tags(entry_id INT, tag TEXT);`)
 	for _, col := range []string{"updated TEXT", "tags TEXT", "ident TEXT"} {
 		db.Exec("ALTER TABLE entries ADD COLUMN " + col)   // 旧库补列；已存在则报错被忽略
 	}
+	db.Exec("DROP TABLE IF EXISTS aliases")   // 旧表名，已废弃（数据是派生的，直接丢）
 	return db
 }
 
@@ -234,10 +242,10 @@ func upsert(p string) {
 		return
 	}
 	id, _ := res.LastInsertId()
-	db.Exec("DELETE FROM aliases WHERE entry_id=?", id)
+	db.Exec("DELETE FROM tags WHERE entry_id=?", id)
 	for _, t := range strings.Split(metaTags(m), ",") {
 		if s := strings.TrimSpace(t); s != "" {
-			db.Exec("INSERT INTO aliases VALUES(?,?)", id, s)
+			db.Exec("INSERT INTO tags VALUES(?,?)", id, s)
 		}
 	}
 }
@@ -247,14 +255,14 @@ func mustID(r string) string { v, _ := identOf(r); return v }
 func dropRow(r string) {
 	db := openDB()
 	defer db.Close()
-	db.Exec("DELETE FROM aliases WHERE entry_id IN (SELECT id FROM entries WHERE path=?)", r)
+	db.Exec("DELETE FROM tags WHERE entry_id IN (SELECT id FROM entries WHERE path=?)", r)
 	db.Exec("DELETE FROM entries WHERE path=?", r)
 }
 
 func rebuild() {
 	db := openDB()
 	defer db.Close()
-	db.Exec("DELETE FROM aliases")
+	db.Exec("DELETE FROM tags")
 	db.Exec("DELETE FROM entries")
 	n := 0
 	for _, p := range walkEntries() {
@@ -269,7 +277,7 @@ func rebuild() {
 		id, _ := res.LastInsertId()
 		for _, t := range strings.Split(metaTags(m), ",") {
 			if s := strings.TrimSpace(t); s != "" {
-				db.Exec("INSERT INTO aliases VALUES(?,?)", id, s)
+				db.Exec("INSERT INTO tags VALUES(?,?)", id, s)
 			}
 		}
 		n++
@@ -716,9 +724,12 @@ func doSearch(q string, limit int, asJSON bool) int {
 		hits = hits[:limit]
 	}
 	if asJSON {
+		out := []map[string]string{}
 		for _, h := range hits {
-			fmt.Printf("{\"id\":\"%s\",\"path\":\"%s\",\"title\":\"%s\"}\n", h.ident, h.path, h.title)
+			out = append(out, map[string]string{"id": h.ident, "path": h.path, "title": h.title, "tags": h.tg, "updated": h.upd, "summary": h.sum})
 		}
+		b, _ := json.MarshalIndent(out, "", " ")
+		fmt.Println(string(b))
 		return 0
 	}
 	for _, h := range hits {
@@ -732,30 +743,6 @@ func doSearch(q string, limit int, asJSON bool) int {
 		}
 		fmt.Printf("[%s] %s\n    %s | tags: %s | updated: %s | %s\n", h.ident, h.path, h.title, tg, up, h.sum)
 	}
-	return 0
-}
-
-func doDup() int {
-	db := openDB()
-	defer db.Close()
-	rows, _ := db.Query(`SELECT e.path, e.title, e.tags FROM entries e`)
-	seen := map[string]string{}
-	for rows.Next() {
-		var p, t, tg string
-		rows.Scan(&p, &t, &tg)
-		keys := append([]string{t}, strings.Split(tg, ",")...)
-		for _, k := range keys {
-			k = strings.ToLower(strings.TrimSpace(k))
-			if k == "" {
-				continue
-			}
-			if v, ok := seen[k]; ok && v != p {
-				fmt.Printf("dup: %s -> %s / %s\n", k, v, p)
-			}
-			seen[k] = p
-		}
-	}
-	rows.Close()
 	return 0
 }
 
@@ -908,8 +895,6 @@ func main() {
 		os.Exit(doRetag())
 	case "lint":
 		os.Exit(doLint())
-	case "dup":
-		os.Exit(doDup())
 	case "search":
 		os.Exit(doSearch(arg(rest, 0), 5, hasFlag(args, "--json")))
 	case "push":

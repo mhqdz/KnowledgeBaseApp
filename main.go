@@ -286,7 +286,7 @@ func similarTags(tags string, self string) (blocking []string, hints []string) {
 			if d > 0 && ((n >= 4 && d*3 <= n) || (n < 4 && d <= 1)) {
 				blocking = append(blocking, fmt.Sprintf("新 tag 与已有 tag 拼写近似：%q ~ %q（是否改用已有的 %q？）", nt, et, et))
 			} else if strings.Contains(l1, l2) || strings.Contains(l2, l1) {
-				hints = append(hints, fmt.Sprintf("提示：tag %q 与其它条目的 %q 有包含关系，确认是否都要保留", nt, et))
+				blocking = append(blocking, fmt.Sprintf("tag %q 与其它条目的 %q 有包含关系：tags 只写上层/通用词，建议改成 %q", nt, et, et))
 			}
 		}
 	}

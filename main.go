@@ -252,36 +252,37 @@ func existingTags() []string {
 	return out
 }
 
-// 新 tags 里有没有"像已有 tag"的（拼写近似 / 互相包含）
-func similarTagWarnings(tags string) []string {
+// 返回 (必须确认的, 仅提示的)：拼写近似 → 必拦；包含关系 → 只提示
+func similarTags(tags string, self string) (blocking []string, hints []string) {
 	ex := existingTags()
-	var out []string
+	selfSet := map[string]bool{}
+	if self != "" {
+		if m, _, err := readEntry(self); err == nil {
+			for _, t := range splitTags(m["tags"]) {
+				selfSet[strings.ToLower(t)] = true
+			}
+		}
+	}
 	for _, nt := range splitTags(tags) {
 		l1 := strings.ToLower(nt)
 		for _, et := range ex {
 			l2 := strings.ToLower(et)
-			if l1 == l2 {
-				continue
+			if l1 == l2 || selfSet[l2] {
+				continue // 跳过自己条目里已有的 tag
 			}
-			d := editDist(l1, l2)
 			n := len([]rune(l1))
 			if m := len([]rune(l2)); m > n {
 				n = m
 			}
-			hit := strings.Contains(l1, l2) || strings.Contains(l2, l1)
-			if !hit {
-				if n >= 4 && d*3 <= n {
-					hit = true
-				} else if n < 4 && d <= 1 {
-					hit = true
-				}
-			}
-			if hit {
-				out = append(out, fmt.Sprintf("新 tag 与已有 tag 相似：%q ~ %q（是否改用已有的 %q？）", nt, et, et))
+			d := editDist(l1, l2)
+			if d > 0 && ((n >= 4 && d*3 <= n) || (n < 4 && d <= 1)) {
+				blocking = append(blocking, fmt.Sprintf("新 tag 与已有 tag 拼写近似：%q ~ %q（是否改用已有的 %q？）", nt, et, et))
+			} else if strings.Contains(l1, l2) || strings.Contains(l2, l1) {
+				hints = append(hints, fmt.Sprintf("提示：新 tag %q 与已有 tag %q 有包含关系，确认是否需要同时保留", nt, et))
 			}
 		}
 	}
-	return out
+	return
 }
 
 // ---------- 检索分词 ----------
@@ -617,7 +618,11 @@ func doAdd(draft string, force bool, args []string) int {
 		return 1
 	}
 	text := makeFM(title, tags) + strings.TrimSpace(body) + "\n"
-	probs := append(checkProblems(parse2(text), text), similarTagWarnings(tags)...)
+	blocking, hints := similarTags(tags, "")
+	probs := append(checkProblems(parse2(text), text), blocking...)
+	for _, h := range hints {
+		fmt.Println("  " + h)
+	}
 	if len(probs) > 0 && !force {
 		fmt.Println("写入被拦下 —— 需要你【两次确认】：")
 		for _, x := range probs {
@@ -669,7 +674,11 @@ func doUpdate(id, draft, to string, args []string) int {
 		tags = metaTags(cur)
 	}
 	text := makeFM(title, tags) + strings.TrimSpace(body) + "\n"
-	probs := append(checkProblems(parse2(text), text), similarTagWarnings(tags)...)
+	blocking, hints := similarTags(tags, p)
+	probs := append(checkProblems(parse2(text), text), blocking...)
+	for _, h := range hints {
+		fmt.Println("  " + h)
+	}
 	if len(probs) > 0 && !hasFlag(args, "--force") {
 		fmt.Println("写入被拦下 —— 需要你【两次确认】：")
 		for _, x := range probs {

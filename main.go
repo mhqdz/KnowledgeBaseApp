@@ -159,6 +159,20 @@ func idToPath(id string) string {
 	return res
 }
 
+// slotTaken 判断目录里是否已有条目占用某个槽前缀（id 由每段路径前缀组成，槽不能重复）
+func slotTaken(dir, slot string) bool {
+	fs, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, f := range fs {
+		if !f.IsDir() && strings.HasPrefix(f.Name(), slot+"-") {
+			return true
+		}
+	}
+	return false
+}
+
 func freeSlot(dir string) string {
 	used := map[string]bool{}
 	des, _ := os.ReadDir(dir)
@@ -196,7 +210,6 @@ func summary(body string) string {
 	}
 	return ""
 }
-
 
 // ---------- 相似 tag 检查 ----------
 func editDist(a, b string) int {
@@ -337,9 +350,9 @@ func openDB() *sql.DB {
       category TEXT, updated TEXT, tags TEXT, ident TEXT);
       CREATE TABLE IF NOT EXISTS tags(entry_id INT, tag TEXT);`)
 	for _, col := range []string{"updated TEXT", "tags TEXT", "ident TEXT"} {
-		db.Exec("ALTER TABLE entries ADD COLUMN " + col)   // 旧库补列；已存在则报错被忽略
+		db.Exec("ALTER TABLE entries ADD COLUMN " + col) // 旧库补列；已存在则报错被忽略
 	}
-	db.Exec("DROP TABLE IF EXISTS aliases")   // 旧表名，已废弃（数据是派生的，直接丢）
+	db.Exec("DROP TABLE IF EXISTS aliases") // 旧表名，已废弃（数据是派生的，直接丢）
 	return db
 }
 
@@ -351,7 +364,7 @@ func upsert(p string) {
 	_, err := db.Exec(`INSERT INTO entries(path,kind,title,summary,category,updated,tags,ident)
       VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET title=excluded.title,summary=excluded.summary,
       updated=excluded.updated,tags=excluded.tags,ident=excluded.ident`,
-		r, "leaf", m["title"], summary(body), filepath.Dir(r), m["updated"], metaTags(m), body, mustID(r))
+		r, "leaf", m["title"], summary(body), filepath.Dir(r), m["updated"], metaTags(m), mustID(r))
 	if err != nil {
 		return
 	}
@@ -454,10 +467,24 @@ func push(quiet bool) int {
 	return code
 }
 
+func dbg(format string, a ...any) {
+	if os.Getenv("KB_DEBUG") == "1" {
+		fmt.Fprintf(os.Stderr, "[kb] "+format+"\n", a...)
+	}
+}
+
 func flagValue(args []string, name string) string {
-	for i, a := range args {
-		if a == name && i+1 < len(args) {
-			return args[i+1]
+	// 全量扫描：flag 可以出现在位置参数之后（kb update <id> --to <dir>）
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == name {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(a, name+"=") {
+			return strings.TrimPrefix(a, name+"=")
 		}
 	}
 	return ""
@@ -679,6 +706,19 @@ func doAdd(draft string, force bool, args []string) int {
 	if name == "" {
 		name = strings.TrimSuffix(filepath.Base(draft), D)
 	}
+	for _, ex := range walkEntries() {
+		if filepath.Dir(ex) != d {
+			continue
+		}
+		en := filepath.Base(ex)
+		if rePFX.MatchString(en) {
+			en = en[3:]
+		}
+		if strings.EqualFold(strings.TrimSuffix(en, E), name) {
+			fmt.Printf("已存在同名条目：%s —— 拒绝添加（请改用 kb update <id>）\n", rel(ex))
+			return 1
+		}
+	}
 	dest := filepath.Join(d, slot+"-"+name+E)
 	if err := os.WriteFile(dest, []byte(text), 0o644); err != nil {
 		fmt.Println("写入失败：" + err.Error())
@@ -701,21 +741,26 @@ func doUpdate(id, draft, to string, args []string) int {
 		fmt.Printf("没有这个 id：%s\n", id)
 		return 1
 	}
-	raw, err := os.ReadFile(draft)
-	if err != nil {
-		fmt.Printf("草稿不存在：%s\n", draft)
-		return 1
-	}
 	cur := Meta{}
-	cur, _, _ = readEntry(p)
-	_, body := parseFM(string(raw))
+	var curBody string
+	cur, curBody, _ = readEntry(p)
+	body := curBody
+	if draft != "" {
+		raw, err := os.ReadFile(draft)
+		if err != nil {
+			fmt.Printf("草稿不存在：%s\n", draft)
+			return 1
+		}
+		_, body = parseFM(string(raw))
+	}
 	title := flagValue(args, "--title")
 	if title == "" {
 		title = cur["title"]
 	}
-	tags := flagValue(args, "--tags")
-	if tags == "" {
-		tags = metaTags(cur)
+	// 只有显式传了 --tags 才替换；没传就保持原样
+	tags := metaTags(cur)
+	if hasFlag(args, "--tags") {
+		tags = flagValue(args, "--tags")
 	}
 	text := makeFM(title, tags) + strings.TrimSpace(body) + "\n"
 	blocking, hints := similarTags(tags, p)
@@ -730,22 +775,47 @@ func doUpdate(id, draft, to string, args []string) int {
 		}
 		return 2
 	}
+	// title ⇄ 文件名校验：前缀之后那段必须等于 title；不一致就改名（目标已存在则拒绝）
+	base := reBad.ReplaceAllString(strings.TrimSpace(title), "-")
+	if base == "" {
+		fmt.Println("title 不能为空")
+		return 1
+	}
+	pfx := ""
+	if i := strings.Index(filepath.Base(p), "-"); rePFX.MatchString(filepath.Base(p)) {
+		pfx = filepath.Base(p)[:i+1]
+	}
+	want := filepath.Join(filepath.Dir(p), pfx+base+E)
+	if want != p {
+		if _, err := os.Stat(want); err == nil {
+			fmt.Printf("已存在同名条目：%s —— 拒绝改名（请先改标题或删掉那条）\n", rel(want))
+			return 1
+		}
+	}
 	oldRel := rel(p)
+	dbg("update: id=%s to=%q p=%s", id, to, p)
 	if to != "" {
 		tgt := idToPath(to)
 		if tgt == "" {
-			fmt.Printf("目标目录不存在：%s\n", to)
-			return 1
+			// 也允许直接给目录路径（相对知识库根）
+			cand := filepath.Join(kbDir, strings.TrimPrefix(strings.TrimSuffix(to, "/"), "./"))
+			if st, err := os.Stat(cand); err == nil && st.IsDir() {
+				tgt = cand
+			} else {
+				fmt.Printf("目标目录不存在：%s（可以用目录 id 或目录路径）\n", to)
+				return 1
+			}
 		}
 		if st, err := os.Stat(tgt); err != nil || !st.IsDir() {
 			fmt.Printf("目标必须是目录 id（不能是条目）：%s\n", to)
 			return 1
 		}
-		slot := freeSlot(tgt)
 		base := filepath.Base(p)
 		name := base
+		slot := freeSlot(tgt)
 		if rePFX.MatchString(base) {
 			name = base[3:]
+			_ = base[:2] // 跨目录时槽一定会重新分配（id 随之变化，这是设计）
 		}
 		np := filepath.Join(tgt, slot+"-"+name)
 		if _, err := os.Stat(np); err == nil {
@@ -756,6 +826,26 @@ func doUpdate(id, draft, to string, args []string) int {
 			os.Rename(p, np)
 		}
 		p = np
+		// 移动后必须重算"按 title 应有的路径"，否则下面的改名会把条目搬回旧目录
+		base2 := reBad.ReplaceAllString(strings.TrimSpace(title), "-")
+		pfx2 := ""
+		if i := strings.Index(filepath.Base(p), "-"); rePFX.MatchString(filepath.Base(p)) {
+			pfx2 = filepath.Base(p)[:i+1]
+		}
+		want = filepath.Join(filepath.Dir(p), pfx2+base2+E)
+		if want != p {
+			if _, err := os.Stat(want); err == nil {
+				fmt.Printf("已存在同名条目：%s —— 拒绝改名\n", rel(want))
+				return 1
+			}
+		}
+	}
+	if want != p {
+		oldRel = rel(p)
+		if _, code := git("mv", rel(p), rel(want)); code != 0 {
+			os.Rename(p, want)
+		}
+		p = want
 	}
 	if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
 		fmt.Println("  !! 写文件失败：" + err.Error())
@@ -765,8 +855,10 @@ func doUpdate(id, draft, to string, args []string) int {
 		dropRow(oldRel)
 	}
 	fmt.Printf("更新 %s（id %s）\n", rel(p), mustID(rel(p)))
-	os.Remove(draft)
-	fmt.Println("草稿已删除（需要时用 kb get " + mustID(rel(p)) + " 重建）")
+	if draft != "" {
+		os.Remove(draft)
+		fmt.Println("草稿已删除（需要时用 kb get " + mustID(rel(p)) + " 重建）")
+	}
 	upsert(p)
 	commit("kb: update " + title)
 	push(false)
@@ -968,6 +1060,15 @@ func doLint() int {
 		if !reID2.MatchString(filepath.Base(p)) {
 			msgs = append(msgs, "文件名缺前缀")
 		}
+		// 文件名（前缀之后那段）必须等于 title
+		base := filepath.Base(p)
+		wantName := reBad.ReplaceAllString(strings.TrimSpace(m["title"]), "-") + E
+		if rePFX.MatchString(base) {
+			wantName = base[:3] + wantName
+		}
+		if base != wantName {
+			msgs = append(msgs, "文件名与 title 不一致（应为 "+wantName+"）")
+		}
 		if len(msgs) > 0 {
 			warn++
 			fmt.Printf("warn  %-42s %s\n", rel(p), strings.Join(msgs, "；"))
@@ -1082,10 +1183,15 @@ func main() {
 			fmt.Sscanf(v, "%d", &depth)
 		}
 		pos := []string{}
-		for _, x := range rest {
-			if !strings.HasPrefix(x, "--") {
-				pos = append(pos, x)
+		for i := 0; i < len(rest); i++ {
+			x := rest[i]
+			if strings.HasPrefix(x, "--") {
+				if x == "--depth" {
+					i++ // 跳过后面的数值，别当成 id
+				}
+				continue
 			}
+			pos = append(pos, x)
 		}
 		id := ""
 		if len(pos) > 0 {

@@ -473,6 +473,28 @@ func dbg(format string, a ...any) {
 	}
 }
 
+// 会带一个值参数的 flag（其余 --xxx 视为布尔开关）
+var valueFlags = map[string]bool{"--to": true, "--title": true, "--tags": true, "--category": true, "--depth": true, "--range": true, "--port": true, "--searxng": true, "--offset": true, "--max-chars": true, "--timeout": true, "--n": true}
+
+// positional 取第 n 个位置参数（跳过 flag 与其值，flag 放在哪里都行）
+func positional(args []string, n int) string {
+	pos := []string{}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "--") {
+			if !strings.Contains(a, "=") && valueFlags[a] {
+				i++
+			}
+			continue
+		}
+		pos = append(pos, a)
+	}
+	if n >= 0 && n < len(pos) {
+		return pos[n]
+	}
+	return ""
+}
+
 func flagValue(args []string, name string) string {
 	// 全量扫描：flag 可以出现在位置参数之后（kb update <id> --to <dir>）
 	for i := 0; i < len(args); i++ {
@@ -1172,11 +1194,11 @@ func main() {
 		}
 		fmt.Println(usageTx)
 	case "id":
-		os.Exit(doID(arg(rest, 0)))
+		os.Exit(doID(positional(rest, 0)))
 	case "get":
-		os.Exit(doGet(arg(rest, 0)))
+		os.Exit(doGet(positional(rest, 0)))
 	case "ls":
-		os.Exit(doLS(arg(rest, 0)))
+		os.Exit(doLS(positional(rest, 0)))
 	case "tree":
 		depth := 3
 		if v := flagValue(args, "--depth"); v != "" {
@@ -1199,7 +1221,7 @@ func main() {
 		}
 		os.Exit(doTree(id, depth))
 	case "add":
-		os.Exit(doAdd(arg(rest, 0), hasFlag(args, "--force"), args))
+		os.Exit(doAdd(positional(rest, 0), hasFlag(args, "--force"), args))
 	case "update":
 		to := flagValue(args, "--to")
 		pos := []string{}
@@ -1221,9 +1243,9 @@ func main() {
 		}
 		os.Exit(doUpdate(id, draft, to, args))
 	case "move":
-		os.Exit(doMove(arg(rest, 0), arg(rest, 1)))
+		os.Exit(doMove(positional(rest, 0), positional(rest, 1)))
 	case "delete":
-		os.Exit(doDelete(arg(rest, 0), hasFlag(args, "--force") || hasFlag(args, "--yes")))
+		os.Exit(doDelete(positional(rest, 0), hasFlag(args, "--force") || hasFlag(args, "--yes")))
 	case "index":
 		rebuild()
 	case "lint":

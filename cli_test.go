@@ -252,3 +252,38 @@ func treeOf(root string) string {
 	})
 	return b.String()
 }
+
+// flag 放在位置参数之前（曾经的 bug：arg(rest,0) 会把 --category 当成草稿名）
+func TestFlagsBeforePositional(t *testing.T) {
+	e := newEnv(t)
+	f := e.write("a.md", bodyA)
+	out, code := e.run("add", "--category", "00-甲", "--title", "甲条目", "--tags", "测试", f)
+	if code != 0 {
+		t.Fatalf("flag 在前的 add 失败(%d): %s", code, out)
+	}
+	if !strings.Contains(out, "0000") {
+		t.Errorf("未分配 id: %s", out)
+	}
+	if got, _ := e.run("get", "0000"); !strings.Contains(got, "甲条目正文") {
+		t.Errorf("get 失败: %s", got)
+	}
+}
+
+func TestDeleteFlagBeforeId(t *testing.T) {
+	e := newEnv(t)
+	e.run("add", e.write("a.md", bodyA), "--category", "00-甲", "--title", "甲条目", "--tags", "测试")
+	if out, code := e.run("delete", "--force", "0000"); code != 0 {
+		t.Fatalf("delete --force 0000 失败(%d): %s", code, out)
+	}
+	if _, err := os.Stat(filepath.Join(e.root, "00-甲", "00-甲条目.kbx")); err == nil {
+		t.Errorf("条目未被删除")
+	}
+}
+
+func TestTreeDepthBeforeId(t *testing.T) {
+	e := newEnv(t)
+	e.run("add", e.write("a.md", bodyA), "--category", "00-甲", "--title", "甲条目", "--tags", "测试")
+	if out, code := e.run("tree", "--depth", "2", "00"); code != 0 {
+		t.Errorf("tree --depth 2 00 失败(%d): %s", code, out)
+	}
+}

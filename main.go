@@ -581,54 +581,128 @@ func doLS(id string) int {
 	return 0
 }
 
-func doTree(id string, depth int) int {
+type treeNode struct {
+	Name     string      `json:"name"`
+	Path     string      `json:"path"`
+	Count    int         `json:"count"`
+	IsEntry  bool        `json:"is_entry,omitempty"`
+	Children []*treeNode `json:"children,omitempty"`
+}
+
+// doTree 打印目录概览：节点名 + 该节点下的条目数；默认隐藏条目（叶子），-a 显示
+func doTree(argID string, depth int, showAll, asJSON bool) int {
 	base := kbDir
-	if id != "" {
-		p := idToPath(id)
+	if argID != "" {
+		p := idToPath(argID)
 		if p == "" {
-			fmt.Printf("没有这个 id：%s\n", id)
+			fmt.Printf("没有这个 id：%s\n", argID)
 			return 1
 		}
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			p = filepath.Dir(p)
+		if st, err := os.Stat(p); err != nil || !st.IsDir() {
+			fmt.Printf("不是目录：%s\n", argID)
+			return 1
 		}
 		base = p
 	}
-	head := "~"
-	if r := rel(base); r != "." {
-		head = r
+	root := &treeNode{Name: filepath.Base(rel(base)), Path: rel(base)}
+	if root.Path == "." {
+		root.Name, root.Path = "/", ""
 	}
-	fmt.Printf("%s/  (%s)\n", head, orDash(id))
-	var walk func(string, int)
-	walk = func(dir string, lvl int) {
-		if lvl > depth {
+	var insert func(n *treeNode, parts []string, full string)
+	insert = func(n *treeNode, parts []string, full string) {
+		if len(parts) == 1 {
+			n.Children = append(n.Children, &treeNode{Name: parts[0], Path: full, IsEntry: true, Count: 1})
 			return
 		}
-		des, _ := os.ReadDir(dir)
-		for _, d := range des {
-			if d.Name() == TPL || strings.HasPrefix(d.Name(), ".") {
-				continue
+		var child *treeNode
+		for _, c := range n.Children {
+			if !c.IsEntry && c.Name == parts[0] {
+				child = c
+				break
 			}
-			if !d.IsDir() && !strings.HasSuffix(d.Name(), E) {
-				continue
-			}
-			code, _ := identOf(rel(filepath.Join(dir, d.Name())))
-			short := code
-			if len(code) >= 2 {
-				short = code[len(code)-2:]
-			}
-			pad := strings.Repeat("  ", lvl-1)
-			if d.IsDir() {
-				fmt.Printf("%s%s  %s/\n", pad, short, d.Name())
-				walk(filepath.Join(dir, d.Name()), lvl+1)
+		}
+		if child == nil {
+			child = &treeNode{Name: parts[0], Path: filepath.Join(n.Path, parts[0])}
+			n.Children = append(n.Children, child)
+		}
+		insert(child, parts[1:], full)
+	}
+	for _, e := range walkEntries() {
+		r := rel(e)
+		if root.Path != "" && !strings.HasPrefix(r, root.Path+string(filepath.Separator)) {
+			continue
+		}
+		sub := strings.TrimPrefix(strings.TrimPrefix(r, root.Path), string(filepath.Separator))
+		if sub == "" {
+			continue
+		}
+		insert(root, strings.Split(sub, string(filepath.Separator)), r)
+	}
+	var countUp func(n *treeNode) int
+	countUp = func(n *treeNode) int {
+		c := 0
+		for _, ch := range n.Children {
+			if ch.IsEntry {
+				c++
 			} else {
-				m, _, _ := readEntry(filepath.Join(dir, d.Name()))
-				fmt.Printf("%s%s  %s  — %s\n", pad, short, d.Name(), m["title"])
+				c += countUp(ch)
+			}
+		}
+		n.Count = c
+		return c
+	}
+	countUp(root)
+	var nDirs, nEntries int
+	var sortNode func(n *treeNode)
+	sortNode = func(n *treeNode) {
+		sort.Slice(n.Children, func(a, b int) bool { return n.Children[a].Name < n.Children[b].Name })
+		for _, ch := range n.Children {
+			if ch.IsEntry {
+				nEntries++
+			} else {
+				nDirs++
+				sortNode(ch)
 			}
 		}
 	}
-	walk(base, 1)
+	sortNode(root)
+	if asJSON {
+		b, _ := json.MarshalIndent(root, "", "  ")
+		fmt.Println(string(b))
+		return 0
+	}
+	var maxDepth int
+	if depth > 0 {
+		maxDepth = depth
+	}
+	var walk func(n *treeNode, level int, prefix string)
+	walk = func(n *treeNode, level int, prefix string) {
+		if maxDepth > 0 && level > maxDepth {
+			return
+		}
+		for _, ch := range n.Children {
+			if ch.IsEntry && !showAll {
+				continue
+			}
+			label := ch.Name
+			if !ch.IsEntry && ch.Count > 0 {
+				label += "/"
+			}
+			fmt.Printf("%s%s  (%d)\n", prefix, label, ch.Count)
+			walk(ch, level+1, prefix+"  ")
+		}
+	}
+	fmt.Printf("%s  (%d 条)\n", showLabel(root.Name), root.Count)
+	walk(root, 1, "  ")
+	fmt.Printf("\n目录 %d 个 / 条目 %d 条\n", nDirs, nEntries)
 	return 0
+}
+
+func showLabel(s string) string {
+	if s == "" {
+		return "/"
+	}
+	return s
 }
 
 func orDash(s string) string {
@@ -1207,7 +1281,7 @@ func main() {
 		pos := []string{}
 		for i := 0; i < len(rest); i++ {
 			x := rest[i]
-			if strings.HasPrefix(x, "--") {
+			if strings.HasPrefix(x, "-") {
 				if x == "--depth" {
 					i++ // 跳过后面的数值，别当成 id
 				}
@@ -1219,7 +1293,7 @@ func main() {
 		if len(pos) > 0 {
 			id = pos[0]
 		}
-		os.Exit(doTree(id, depth))
+		os.Exit(doTree(id, depth, hasFlag(args, "-a") || hasFlag(args, "--all"), hasFlag(args, "--json")))
 	case "add":
 		os.Exit(doAdd(positional(rest, 0), hasFlag(args, "--force"), args))
 	case "update":

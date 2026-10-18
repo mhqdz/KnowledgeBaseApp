@@ -287,3 +287,24 @@ func TestTreeDepthBeforeId(t *testing.T) {
 		t.Errorf("tree --depth 2 00 失败(%d): %s", code, out)
 	}
 }
+
+func TestTreeCountsAndLeaves(t *testing.T) {
+	e := newEnv(t)
+	e.run("add", e.write("a.md", bodyA), "--category", "00-甲/00-子", "--title", "甲条目", "--tags", "测试")
+	e.run("add", e.write("b.md", bodyB), "--category", "00-甲", "--title", "乙条目", "--tags", "测试")
+	out, _ := e.run("tree")
+	if !strings.Contains(out, "00-甲") || !strings.Contains(out, "(2)") {
+		t.Errorf("tree 未显示目录计数: %s", out)
+	}
+	if strings.Contains(out, ".kbx") {
+		t.Errorf("默认不应显示叶子: %s", out)
+	}
+	out2, _ := e.run("tree", "-a")
+	if !strings.Contains(out2, ".kbx") {
+		t.Errorf("-a 应显示叶子: %s", out2)
+	}
+	out3, _ := e.run("tree", "--json")
+	if !strings.Contains(out3, `"count"`) {
+		t.Errorf("--json 输出异常: %s", out3)
+	}
+}

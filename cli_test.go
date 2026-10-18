@@ -300,11 +300,44 @@ func TestTreeCountsAndLeaves(t *testing.T) {
 		t.Errorf("默认不应显示叶子: %s", out)
 	}
 	out2, _ := e.run("tree", "-a")
-	if !strings.Contains(out2, ".kbx") {
+	if !strings.Contains(out2, "甲条目") {
 		t.Errorf("-a 应显示叶子: %s", out2)
 	}
 	out3, _ := e.run("tree", "--json")
 	if !strings.Contains(out3, `"count"`) {
 		t.Errorf("--json 输出异常: %s", out3)
+	}
+}
+
+func TestConfigAndHelpWrite(t *testing.T) {
+	e := newEnv(t)
+	cfg := filepath.Join(e.root, "kb-config.json")
+	e.run("add", e.write("a.md", bodyA), "--category", "00-甲", "--title", "写入须知", "--tags", "测试")
+	// 设置指针（通过 KB_CONFIG 环境变量隔离配置）
+	cmd := exec.Command(kbBin, "config", "set", "write_guide", "0000")
+	cmd.Env = append(os.Environ(), "KB_ROOT="+e.root,
+		"KB_DB="+filepath.Join(e.root, "..", "kb-test.sqlite"),
+		"KB_CONFIG="+cfg, "HOME="+e.root)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("config set 失败: %s", out)
+	}
+	cmd2 := exec.Command(kbBin, "help", "-w")
+	cmd2.Env = append(os.Environ(), "KB_ROOT="+e.root,
+		"KB_DB="+filepath.Join(e.root, "..", "kb-test.sqlite"),
+		"KB_CONFIG="+cfg, "HOME="+e.root)
+	out, err := cmd2.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "写入须知") {
+		t.Errorf("help -w 异常: %v %s", err, out)
+	}
+}
+
+func TestNoArgsDoesNotPanic(t *testing.T) {
+	e := newEnv(t)
+	out, code := e.run()
+	if code != 0 || strings.Contains(out, "panic") {
+		t.Errorf("无参数不应 panic: code=%d out=%s", code, out)
+	}
+	if !strings.Contains(out, "kb") {
+		t.Errorf("无参数应打印用法: %s", out)
 	}
 }

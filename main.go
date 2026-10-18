@@ -42,6 +42,8 @@ var (
   kb move <id> <目标目录id>         移动一个条目或一整棵子树
   kb delete <id> --force           删除
   kb version                       打印版本（构建时的 commit）
+  kb config [set <key> <value> | unset <key>]   读写 ~/.config/kb/config.json
+  kb help -w                       打印写入须知（指向 config 里的 write_guide 条目）
   kb index / lint / push / sync / help
 
 front matter 由 kb 生成，字段只有 title / tags / updated。`
@@ -495,6 +497,116 @@ func positional(args []string, n int) string {
 	return ""
 }
 
+// ---------- 配置（~/.config/kb/config.json）----------
+
+func kbConfigPath() string {
+	if v := os.Getenv("KB_CONFIG"); v != "" {
+		return v
+	}
+	return filepath.Join(os.Getenv("HOME"), ".config", "kb", "config.json")
+}
+
+func loadConfig() map[string]string {
+	m := map[string]string{}
+	b, err := os.ReadFile(kbConfigPath())
+	if err != nil {
+		return m
+	}
+	var raw map[string]any
+	if json.Unmarshal(b, &raw) != nil {
+		return m
+	}
+	for k, v := range raw {
+		if s, ok := v.(string); ok {
+			m[k] = s
+		}
+	}
+	return m
+}
+
+func saveConfig(m map[string]string) error {
+	p := kbConfigPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	b, _ := json.MarshalIndent(m, "", "  ")
+	return os.WriteFile(p, append(b, '\n'), 0o644)
+}
+
+// doConfig：kb config（打印）/ kb config set <key> <value> / kb config unset <key>
+func doConfig(args []string) int {
+	pos := []string{}
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			pos = append(pos, a)
+		}
+	}
+	m := loadConfig()
+	if len(pos) == 0 {
+		fmt.Println("# " + kbConfigPath())
+		b, _ := json.MarshalIndent(m, "", "  ")
+		fmt.Println(string(b))
+		return 0
+	}
+	switch pos[0] {
+	case "set":
+		if len(pos) < 3 {
+			fmt.Println("用法: kb config set <key> <value>")
+			return 4
+		}
+		m[pos[1]] = pos[2]
+		if err := saveConfig(m); err != nil {
+			fmt.Println("写配置失败：" + err.Error())
+			return 1
+		}
+		fmt.Printf("已设置 %s = %s\n", pos[1], pos[2])
+		return 0
+	case "unset":
+		if len(pos) < 2 {
+			fmt.Println("用法: kb config unset <key>")
+			return 4
+		}
+		delete(m, pos[1])
+		if err := saveConfig(m); err != nil {
+			fmt.Println("写配置失败：" + err.Error())
+			return 1
+		}
+		fmt.Printf("已删除 %s\n", pos[1])
+		return 0
+	default:
+		fmt.Println("用法: kb config | kb config set <key> <value> | kb config unset <key>")
+		return 4
+	}
+}
+
+// doHelpWrite：打印写入须知（由配置 write_guide 指向的条目）
+func doHelpWrite() int {
+	m := loadConfig()
+	id := m["write_guide"]
+	if id == "" {
+		fmt.Print(`未设置写入须知条目。设置方法：
+  kb config set write_guide <条目id>
+
+要点（完整规则见条目）：
+- 任何写入/修改都先把完整原文给用户看，等确认后再写
+- .kbx 不得手改；要改先拷贝成草稿 .md
+`)
+		return 1
+	}
+	p := idToPath(id)
+	if p == "" {
+		fmt.Printf("配置的写入须知条目不存在：%s（用 kb config set write_guide <id> 修正）\n", id)
+		return 1
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		fmt.Println("读取失败：" + err.Error())
+		return 1
+	}
+	fmt.Printf("# 写入须知（%s  %s）\n\n%s", mustID(rel(p)), rel(p), string(b))
+	return 0
+}
+
 func flagValue(args []string, name string) string {
 	// 全量扫描：flag 可以出现在位置参数之后（kb update <id> --to <dir>）
 	for i := 0; i < len(args); i++ {
@@ -675,6 +787,11 @@ func doTree(argID string, depth int, showAll, asJSON bool) int {
 	if depth > 0 {
 		maxDepth = depth
 	}
+	color := useColor()
+	dirColor, entryColor, reset := "", "", ""
+	if color {
+		dirColor, entryColor, reset = "\033[36m", "\033[2m", "\033[0m"
+	}
 	var walk func(n *treeNode, level int, prefix string)
 	walk = func(n *treeNode, level int, prefix string) {
 		if maxDepth > 0 && level > maxDepth {
@@ -684,11 +801,17 @@ func doTree(argID string, depth int, showAll, asJSON bool) int {
 			if ch.IsEntry && !showAll {
 				continue
 			}
-			label := ch.Name
-			if !ch.IsEntry && ch.Count > 0 {
-				label += "/"
+			if ch.IsEntry {
+				name := strings.TrimSuffix(ch.Name, E)
+				fmt.Printf("%s%s%s%s\n", prefix, entryColor, name, reset)
+				continue
 			}
-			fmt.Printf("%s%s  (%d)\n", prefix, label, ch.Count)
+			label := ch.Name + "/"
+			if ch.Count > 0 {
+				fmt.Printf("%s%s%s%s  (%d)\n", prefix, dirColor, label, reset, ch.Count)
+			} else {
+				fmt.Printf("%s%s%s%s\n", prefix, dirColor, label, reset)
+			}
 			walk(ch, level+1, prefix+"  ")
 		}
 	}
@@ -696,6 +819,17 @@ func doTree(argID string, depth int, showAll, asJSON bool) int {
 	walk(root, 1, "  ")
 	fmt.Printf("\n目录 %d 个 / 条目 %d 条\n", nDirs, nEntries)
 	return 0
+}
+
+func useColor() bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	st, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return st.Mode()&os.ModeCharDevice != 0
 }
 
 func showLabel(s string) string {
@@ -786,6 +920,7 @@ func doAdd(draft string, force bool, args []string) int {
 			fmt.Println("  - " + x)
 		}
 		fmt.Println("流程：先把这些连同条目原文给用户看 → 用户确认 → 再加 --force 重跑")
+		fmt.Println("写入须知：kb help -w")
 		return 2
 	}
 	d, err := resolveCategory(cat)
@@ -869,6 +1004,7 @@ func doUpdate(id, draft, to string, args []string) int {
 		for _, x := range probs {
 			fmt.Println("  - " + x)
 		}
+		fmt.Println("写入须知：kb help -w")
 		return 2
 	}
 	// title ⇄ 文件名校验：前缀之后那段必须等于 title；不一致就改名（目标已存在则拒绝）
@@ -1238,7 +1374,10 @@ func main() {
 	if len(args) > 0 {
 		cmd = args[0]
 	}
-	rest := args[1:]
+	rest := []string{}
+	if len(args) > 1 {
+		rest = args[1:]
+	}
 	// 自愈：数据库为空但磁盘有条目（首次切换或表结构迁移后）→ 自动重建
 	if cmd != "index" {
 		db := openDB()
@@ -1253,6 +1392,9 @@ func main() {
 	case "version", "-v", "--version":
 		fmt.Println("kb " + buildVersion)
 	case "help", "-h", "--help":
+		if hasFlag(rest, "-w") || hasFlag(rest, "--write") {
+			os.Exit(doHelpWrite())
+		}
 		if len(rest) > 0 {
 			hit := false
 			for _, l := range strings.Split(usageTx, "\n") {
@@ -1267,6 +1409,8 @@ func main() {
 			return
 		}
 		fmt.Println(usageTx)
+	case "config":
+		os.Exit(doConfig(rest))
 	case "id":
 		os.Exit(doID(positional(rest, 0)))
 	case "get":

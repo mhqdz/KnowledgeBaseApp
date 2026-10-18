@@ -484,7 +484,7 @@ func positional(args []string, n int) string {
 	pos := []string{}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if strings.HasPrefix(a, "--") {
+		if strings.HasPrefix(a, "-") {
 			if !strings.Contains(a, "=") && valueFlags[a] {
 				i++
 			}

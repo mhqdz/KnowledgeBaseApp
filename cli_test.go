@@ -341,3 +341,14 @@ func TestNoArgsDoesNotPanic(t *testing.T) {
 		t.Errorf("无参数应打印用法: %s", out)
 	}
 }
+
+func TestSearchLimitFlag(t *testing.T) {
+	e := newEnv(t)
+	e.run("add", e.write("a.md", bodyA), "--category", "00-甲", "--title", "甲条目", "--tags", "测试,阿尔法")
+	if out, _ := e.run("search", "-n", "2", "阿尔法"); !strings.Contains(out, "0000") {
+		t.Errorf("-n 在前时应命中: %s", out)
+	}
+	if out, _ := e.run("search", "阿尔法", "-n", "2"); !strings.Contains(out, "0000") {
+		t.Errorf("-n 在后时应命中: %s", out)
+	}
+}

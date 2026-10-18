@@ -476,7 +476,7 @@ func dbg(format string, a ...any) {
 }
 
 // 会带一个值参数的 flag（其余 --xxx 视为布尔开关）
-var valueFlags = map[string]bool{"--to": true, "--title": true, "--tags": true, "--category": true, "--depth": true, "--range": true, "--port": true, "--searxng": true, "--offset": true, "--max-chars": true, "--timeout": true, "--n": true}
+var valueFlags = map[string]bool{"--to": true, "--title": true, "--tags": true, "--category": true, "--depth": true, "--range": true, "--port": true, "--searxng": true, "--offset": true, "--max-chars": true, "--timeout": true, "--n": true, "-n": true, "--limit": true, "-limit": true}
 
 // positional 取第 n 个位置参数（跳过 flag 与其值，flag 放在哪里都行）
 func positional(args []string, n int) string {
@@ -1469,7 +1469,17 @@ func main() {
 	case "lint":
 		os.Exit(doLint())
 	case "search":
-		os.Exit(doSearch(firstPositional(rest), 5, hasFlag(args, "--json")))
+		limit := 5
+		if v := flagValue(rest, "-n"); v != "" {
+			if x, err := strconv.Atoi(v); err == nil && x > 0 {
+				limit = x
+			}
+		} else if v := flagValue(rest, "--limit"); v != "" {
+			if x, err := strconv.Atoi(v); err == nil && x > 0 {
+				limit = x
+			}
+		}
+		os.Exit(doSearch(positional(rest, 0), limit, hasFlag(args, "--json")))
 	case "push":
 		os.Exit(push(false))
 	case "sync":

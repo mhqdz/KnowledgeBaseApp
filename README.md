@@ -27,7 +27,7 @@ kb version                                                             # 应打�
 ```
 kbapp          ← 根 module：cmd/kb + internal/cli（唯一的输出层）
 kbapp/core     ← 独立 module：store / entry / index / tag / search / lint / gitx / config
-                 根 module 用 replace 指向 ./core；其它仓库 require klbapp/core 即可
+                 根 module 用 replace 指向 ./core；其它仓库 require  kbapp/core 即可
 ```
 
 ```

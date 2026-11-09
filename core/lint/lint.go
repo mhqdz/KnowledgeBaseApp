@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"kbapp/internal/entry"
-	"kbapp/internal/index"
-	"kbapp/internal/store"
+	"kbapp/core/entry"
+	"kbapp/core/index"
+	"kbapp/core/store"
 )
 
 func Problems(m entry.Meta, text string) []string {

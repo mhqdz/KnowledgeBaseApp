@@ -2,7 +2,12 @@ module kbapp
 
 go 1.26.0
 
-require modernc.org/sqlite v1.60.1
+require (
+	kbapp/core v0.0.0
+	modernc.org/sqlite v1.60.1
+)
+
+replace kbapp/core => ./core
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

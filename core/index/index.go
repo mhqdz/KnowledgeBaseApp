@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"kbapp/internal/entry"
-	"kbapp/internal/store"
+	"kbapp/core/entry"
+	"kbapp/core/store"
 )
 
 func die(f string, a ...any) { fmt.Printf(f+"\n", a...); os.Exit(1) }

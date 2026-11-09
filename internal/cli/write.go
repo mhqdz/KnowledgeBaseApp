@@ -6,12 +6,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"kbapp/internal/entry"
-	"kbapp/internal/gitx"
-	"kbapp/internal/index"
-	"kbapp/internal/lint"
-	"kbapp/internal/store"
-	"kbapp/internal/tag"
+	"kbapp/core/entry"
+	"kbapp/core/gitx"
+	"kbapp/core/index"
+	"kbapp/core/lint"
+	"kbapp/core/store"
+	"kbapp/core/tag"
 )
 
 func RunAdd(draft string, force bool, args []string) int {

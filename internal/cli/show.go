@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"kbapp/internal/entry"
-	"kbapp/internal/store"
+	"kbapp/core/entry"
+	"kbapp/core/store"
 )
 
 func RunID(path string) int {

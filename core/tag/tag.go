@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"kbapp/internal/entry"
-	"kbapp/internal/store"
+	"kbapp/core/entry"
+	"kbapp/core/store"
 )
 
 // ---------- 相似 tag 检查 ----------

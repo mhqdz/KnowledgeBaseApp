@@ -14,30 +14,37 @@
 export PATH=$PATH:/usr/local/go/bin
 cd ~/Workspace/KnowledgeBase
 COMMIT=$(git rev-parse --short HEAD)
-go build -ldflags "-X main.buildVersion=$COMMIT" -o ~/.local/bin/kb ./cmd/kb   # 依赖 modernc.org/sqlite（纯 Go，无 cgo）
+go build -ldflags "-X main.buildVersion=$COMMIT" -o ~/.local/bin/kb ./cmd/kb   # core/ 是独立 module（kbapp/core）   # 依赖 modernc.org/sqlite（纯 Go，无 cgo）
 kb version                                                             # 应打印出这个 commit
 # 拉不到依赖时：go env -w GOPROXY=https://goproxy.cn,direct
 ```
 
 ## 代码结构
 
-`main` 只做入口，逻辑按职责分包（都能 `import`，记忆/其它工具可以直接复用）：
+`main` 只做入口，逻辑在 `core/`（**独立 module `kbapp/core`**，agentd 的记忆层直接 import 它，
+所以格式约定只有一份）：
+
+```
+kbapp          ← 根 module：cmd/kb + internal/cli（唯一的输出层）
+kbapp/core     ← 独立 module：store / entry / index / tag / search / lint / gitx / config
+                 根 module 用 replace 指向 ./core；其它仓库 require klbapp/core 即可
+```
 
 ```
 cmd/kb/main.go            入口：注入版本号，把 os.Args 交给 cli.Run
-internal/cli/             子命令分发 + 参数解析 + 各命令实现（唯一的输出层）
+internal/cli/         子命令分发 + 参数解析 + 各命令实现（唯一的输出层）
   cli.go                    Run()：初始化路径、自愈、switch 分发、usage
   args.go                   positional / flagValue / hasFlag（flag 任意位置）
   show.go                   id / get / ls / tree
   write.go                  add / update / move / delete
-internal/store/           根目录、id ⇄ 路径、遍历、槽位、类目解析（最底层，无内部依赖）
-internal/entry/           .kbx 格式：front matter、正文、摘要
-internal/index/           SQLite 派生索引（entries / tags）
-internal/tag/             tag 规范检查（近似/包含）
-internal/search/          检索分词、中文 2-gram、评分
-internal/lint/            只读体检（文件 + DB 一致性）
-internal/gitx/            commit / push / sync
-internal/config/          ~/.config/kb/config.json 与写入须知
+core/store/           根目录、id ⇄ 路径、遍历、槽位、类目解析（最底层，无内部依赖）
+core/entry/           .kbx 格式：front matter、正文、摘要
+core/index/           SQLite 派生索引（entries / tags）
+core/tag/             tag 规范检查（近似/包含）
+core/search/          检索分词、中文 2-gram、评分
+core/lint/            只读体检（文件 + DB 一致性）
+core/gitx/            commit / push / sync
+core/config/          ~/.config/kb/config.json 与写入须知
 ```
 
 依赖方向单向：`cli → {search,lint,index,tag,config,gitx,store} → {entry,store}`，

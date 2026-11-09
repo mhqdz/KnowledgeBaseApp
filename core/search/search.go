@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"kbapp/internal/index"
-	"kbapp/internal/tag"
+	"kbapp/core/index"
+	"kbapp/core/tag"
 )
 
 // ---------- 检索分词 ----------

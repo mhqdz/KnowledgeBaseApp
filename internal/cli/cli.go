@@ -7,12 +7,12 @@ import (
 	"strconv"
 	"strings"
 
-	"kbapp/internal/config"
-	"kbapp/internal/gitx"
-	"kbapp/internal/index"
-	"kbapp/internal/lint"
-	"kbapp/internal/search"
-	"kbapp/internal/store"
+	"kbapp/core/config"
+	"kbapp/core/gitx"
+	"kbapp/core/index"
+	"kbapp/core/lint"
+	"kbapp/core/search"
+	"kbapp/core/store"
 )
 
 // Usage 是 `kb help` 打印的用法；新增子命令时同步改这里。

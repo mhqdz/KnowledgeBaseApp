@@ -5,8 +5,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"kbapp/internal/index"
-	"kbapp/internal/store"
+	"kbapp/core/index"
+	"kbapp/core/store"
 )
 
 func Git(args ...string) (string, int) {

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"kbapp/internal/store"
+	"kbapp/core/store"
 )
 
 // ---------- 配置（~/.config/kb/config.json）----------

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"kbapp/internal/store"
+	"kbapp/core/store"
 )
 
 type Meta map[string]string

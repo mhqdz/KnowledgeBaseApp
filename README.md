@@ -19,6 +19,24 @@ kb version                                                             # 应打�
 # 拉不到依赖时：go env -w GOPROXY=https://goproxy.cn,direct
 ```
 
+## 代码结构
+
+`main.go` 只是入口（初始化 + 分发子命令），其余按职责分文件：
+
+| 文件 | 职责 |
+|---|---|
+| `store.go` | 知识库根目录、id ⇄ 路径推导、目录遍历、槽位分配、目录解析 |
+| `entry.go` | `.kbx` 格式：front matter 解析/生成、正文、摘要 |
+| `index.go` | SQLite 派生索引（entries / tags，`upsert` / `dropRow` / `rebuild`） |
+| `tags.go` | tag 规范检查（同条目内近似、跨条目拼写近似/包含） |
+| `search.go` | 检索分词与评分 |
+| `lint.go` | 只读体检（文件 + DB 一致性） |
+| `git.go` | commit / push / sync |
+| `config.go` | `~/.config/kb/config.json`、写入须知 |
+| `args.go` | 位置参数与 flag 解析（flag 任意位置） |
+| `cmd_show.go` | `id` / `get` / `ls` / `tree` |
+| `cmd_write.go` | `add` / `update` / `move` / `delete` |
+
 ## 使用方法（简）
 ```bash
 kb search 关键词        # 查（关键词，不要用整句）

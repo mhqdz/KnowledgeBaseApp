@@ -1,18 +1,22 @@
-package main
+package index
 
 import (
 	"database/sql"
 	"fmt"
+	_ "modernc.org/sqlite"
 	"os"
 	"path/filepath"
 	"strings"
 
-	_ "modernc.org/sqlite"
+	"kbapp/internal/entry"
+	"kbapp/internal/store"
 )
 
-func openDB() *sql.DB {
-	os.MkdirAll(filepath.Dir(dbPath), 0o755)
-	db, err := sql.Open("sqlite", dbPath)
+func die(f string, a ...any) { fmt.Printf(f+"\n", a...); os.Exit(1) }
+
+func Open() *sql.DB {
+	os.MkdirAll(filepath.Dir(store.DBPath), 0o755)
+	db, err := sql.Open("sqlite", store.DBPath)
 	if err != nil {
 		die("打开数据库失败: %v", err)
 	}
@@ -27,15 +31,15 @@ func openDB() *sql.DB {
 	return db
 }
 
-func upsert(p string) {
-	r := rel(p)
-	m, body, _ := readEntry(p)
-	db := openDB()
+func Upsert(p string) {
+	r := store.Rel(p)
+	m, body, _ := entry.Read(p)
+	db := Open()
 	defer db.Close()
 	_, err := db.Exec(`INSERT INTO entries(path,kind,title,summary,category,updated,tags,ident)
       VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET title=excluded.title,summary=excluded.summary,
       updated=excluded.updated,tags=excluded.tags,ident=excluded.ident`,
-		r, "leaf", m["title"], summary(body), filepath.Dir(r), m["updated"], metaTags(m), mustID(r))
+		r, "leaf", m["title"], entry.Summary(body), filepath.Dir(r), m["updated"], entry.Tags(m), store.MustID(r))
 	if err != nil {
 		return
 	}
@@ -45,42 +49,42 @@ func upsert(p string) {
 		return
 	}
 	db.Exec("DELETE FROM tags WHERE entry_id=?", id)
-	for _, t := range strings.Split(metaTags(m), ",") {
+	for _, t := range strings.Split(entry.Tags(m), ",") {
 		if s := strings.TrimSpace(t); s != "" {
 			db.Exec("INSERT INTO tags VALUES(?,?)", id, s)
 		}
 	}
 }
 
-func dropRow(r string) {
-	db := openDB()
+func DropRow(r string) {
+	db := Open()
 	defer db.Close()
 	db.Exec("DELETE FROM tags WHERE entry_id IN (SELECT id FROM entries WHERE path=?)", r)
 	db.Exec("DELETE FROM entries WHERE path=?", r)
 }
 
-func rebuild() {
-	db := openDB()
+func Rebuild() {
+	db := Open()
 	defer db.Close()
 	db.Exec("DELETE FROM tags")
 	db.Exec("DELETE FROM entries")
 	n := 0
-	for _, p := range walkEntries() {
-		m, body, _ := readEntry(p)
-		r := rel(p)
+	for _, p := range store.WalkEntries() {
+		m, body, _ := entry.Read(p)
+		r := store.Rel(p)
 		res, err := db.Exec(`INSERT INTO entries(path,kind,title,summary,category,updated,tags,ident)
-          VALUES(?,?,?,?,?,?,?,?)`, r, "leaf", m["title"], summary(body), filepath.Dir(r), m["updated"], metaTags(m), mustID(r))
+          VALUES(?,?,?,?,?,?,?,?)`, r, "leaf", m["title"], entry.Summary(body), filepath.Dir(r), m["updated"], entry.Tags(m), store.MustID(r))
 		if err != nil {
 			fmt.Println("  !! 写入数据库失败：" + err.Error())
 			continue
 		}
 		id, _ := res.LastInsertId()
-		for _, t := range strings.Split(metaTags(m), ",") {
+		for _, t := range strings.Split(entry.Tags(m), ",") {
 			if s := strings.TrimSpace(t); s != "" {
 				db.Exec("INSERT INTO tags VALUES(?,?)", id, s)
 			}
 		}
 		n++
 	}
-	fmt.Printf("indexed %d entries -> %s\n", n, dbPath)
+	fmt.Printf("indexed %d entries -> %s\n", n, store.DBPath)
 }

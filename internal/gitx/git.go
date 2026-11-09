@@ -1,13 +1,16 @@
-package main
+package gitx
 
 import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"kbapp/internal/index"
+	"kbapp/internal/store"
 )
 
-func git(args ...string) (string, int) {
-	c := exec.Command("git", append([]string{"-C", kbDir}, args...)...)
+func Git(args ...string) (string, int) {
+	c := exec.Command("git", append([]string{"-C", store.Root}, args...)...)
 	b, err := c.CombinedOutput()
 	code := 0
 	if err != nil {
@@ -20,25 +23,25 @@ func git(args ...string) (string, int) {
 	return string(b), code
 }
 
-func commit(msg string) {
-	git("add", "-A")
-	if out, code := git("commit", "-qm", msg); code != 0 {
+func Commit(msg string) {
+	Git("add", "-A")
+	if out, code := Git("commit", "-qm", msg); code != 0 {
 		low := strings.ToLower(out)
 		if !strings.Contains(low, "nothing to commit") && !strings.Contains(low, "无文件要提交") {
-			fmt.Println("  !! git commit 失败：" + strings.TrimSpace(firstLine(out)))
+			fmt.Println("  !! git commit 失败：" + strings.TrimSpace(FirstLine(out)))
 		}
 	}
 }
 
-func firstLine(s string) string {
+func FirstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		return s[:i]
 	}
 	return s
 }
 
-func push(quiet bool) int {
-	out, code := git("push", "-q", "origin", "HEAD")
+func Push(quiet bool) int {
+	out, code := Git("push", "-q", "origin", "HEAD")
 	if code == 0 {
 		if !quiet {
 			fmt.Println("pushed -> origin")
@@ -57,9 +60,9 @@ func push(quiet bool) int {
 	return code
 }
 
-func syncCmd() int {
-	git("pull", "--rebase", "-q")
-	rebuild()
-	push(false)
+func Sync() int {
+	Git("pull", "--rebase", "-q")
+	index.Rebuild()
+	Push(false)
 	return 0
 }

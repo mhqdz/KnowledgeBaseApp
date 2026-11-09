@@ -1,21 +1,4 @@
-// kb — 本地知识库工具（Go 版）。.kbx = 收编产物，.md = 草稿。
-// id = 路径每段前 2 位（36 进制）拼接；front matter 只由本工具生成：title / tags / updated。
-//
-// 文件划分（每个文件一个职责）：
-//
-//	store.go     知识库根目录、id ⇄ 路径、目录遍历与槽位分配
-//	entry.go     .kbx 的格式：front matter、正文、摘要
-//	index.go     SQLite 派生索引（entries / tags）
-//	tags.go      tag 规范检查（近似/包含）
-//	search.go    检索评分
-//	lint.go      只读体检
-//	git.go       commit / push / sync
-//	config.go    ~/.config/kb/config.json 与写入须知
-//	args.go      位置参数与 flag 解析
-//	cmd_show.go  id / get / ls / tree
-//	cmd_write.go add / update / move / delete
-//	main.go      仅入口：初始化 + 分发
-package main
+package cli
 
 import (
 	"fmt"
@@ -23,11 +6,17 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"kbapp/internal/config"
+	"kbapp/internal/gitx"
+	"kbapp/internal/index"
+	"kbapp/internal/lint"
+	"kbapp/internal/search"
+	"kbapp/internal/store"
 )
 
-var buildVersion = "dev"
-
-var usageTx = `kb — 本地知识库
+// Usage 是 `kb help` 打印的用法；新增子命令时同步改这里。
+var Usage = `kb — 本地知识库
 
   kb id <路径>                     路径 → id（工具负责推导，不要自己回溯）
   kb get <id>                      打印条目全文（含 front matter）
@@ -44,20 +33,25 @@ var usageTx = `kb — 本地知识库
 
 front matter 由 kb 生成，字段只有 title / tags / updated。`
 
-func die(f string, a ...any) { fmt.Printf(f+"\n", a...); os.Exit(1) }
+// Die 打印一行并退出（只用于"连路径都定不下来"这类没法继续的情况）。
+func Die(f string, a ...any) {
+	fmt.Printf(f+"\n", a...)
+	os.Exit(1)
+}
 
-func main() {
-	kbDir = os.Getenv("KB_ROOT")
-	if kbDir == "" {
+// Run 是全部子命令的分发入口：main 只负责把 os.Args 交进来。
+// 返回值就是退出码（方便测试；真正退出由 main 做）。
+func Run(args []string, version string) int {
+	store.Root = os.Getenv("KB_ROOT")
+	if store.Root == "" {
 		home, _ := os.UserHomeDir()
-		kbDir = filepath.Join(home, ".data", ".kb")
+		store.Root = filepath.Join(home, ".data", ".kb")
 	}
-	dbPath = os.Getenv("KB_DB")
-	if dbPath == "" {
+	store.DBPath = os.Getenv("KB_DB")
+	if store.DBPath == "" {
 		home, _ := os.UserHomeDir()
-		dbPath = filepath.Join(home, ".cache", "kb.sqlite")
+		store.DBPath = filepath.Join(home, ".cache", "kb.sqlite")
 	}
-	args := os.Args[1:]
 	cmd := "help"
 	if len(args) > 0 {
 		cmd = args[0]
@@ -68,24 +62,25 @@ func main() {
 	}
 	// 自愈：数据库为空但磁盘有条目（首次切换或表结构迁移后）→ 自动重建
 	if cmd != "index" {
-		db := openDB()
+		db := index.Open()
 		var n int
 		db.QueryRow("SELECT COUNT(*) FROM entries").Scan(&n)
 		db.Close()
-		if n == 0 && len(walkEntries()) > 0 {
-			rebuild()
+		if n == 0 && len(store.WalkEntries()) > 0 {
+			index.Rebuild()
 		}
 	}
 	switch cmd {
 	case "version", "-v", "--version":
-		fmt.Println("kb " + buildVersion)
+		fmt.Println("kb " + version)
+		return 0
 	case "help", "-h", "--help":
-		if hasFlag(rest, "-w") || hasFlag(rest, "--write") {
-			os.Exit(doHelpWrite())
+		if Has(rest, "-w") || Has(rest, "--write") {
+			return config.HelpWrite()
 		}
 		if len(rest) > 0 {
 			hit := false
-			for _, l := range strings.Split(usageTx, "\n") {
+			for _, l := range strings.Split(Usage, "\n") {
 				if strings.Contains(l, rest[0]) {
 					fmt.Println(l)
 					hit = true
@@ -94,20 +89,21 @@ func main() {
 			if !hit {
 				fmt.Println("没有这个命令；不带参数看全部用法：kb help")
 			}
-			return
+			return 0
 		}
-		fmt.Println(usageTx)
+		fmt.Println(Usage)
+		return 0
 	case "config":
-		os.Exit(doConfig(rest))
+		return config.RunConfig(rest)
 	case "id":
-		os.Exit(doID(positional(rest, 0)))
+		return RunID(Positional(rest, 0))
 	case "get":
-		os.Exit(doGet(positional(rest, 0)))
+		return RunGet(Positional(rest, 0))
 	case "ls":
-		os.Exit(doLS(positional(rest, 0)))
+		return RunLS(Positional(rest, 0))
 	case "tree":
 		depth := 3
-		if v := flagValue(args, "--depth"); v != "" {
+		if v := Value(args, "--depth"); v != "" {
 			fmt.Sscanf(v, "%d", &depth)
 		}
 		pos := []string{}
@@ -125,11 +121,11 @@ func main() {
 		if len(pos) > 0 {
 			id = pos[0]
 		}
-		os.Exit(doTree(id, depth, hasFlag(args, "-a") || hasFlag(args, "--all"), hasFlag(args, "--json")))
+		return RunTree(id, depth, Has(args, "-a") || Has(args, "--all"), Has(args, "--json"))
 	case "add":
-		os.Exit(doAdd(positional(rest, 0), hasFlag(args, "--force"), args))
+		return RunAdd(Positional(rest, 0), Has(args, "--force"), args)
 	case "update":
-		to := flagValue(args, "--to")
+		to := Value(args, "--to")
 		pos := []string{}
 		for i := 0; i < len(rest); i++ {
 			if strings.HasPrefix(rest[i], "--") {
@@ -147,33 +143,34 @@ func main() {
 		if len(pos) > 1 {
 			draft = pos[1]
 		}
-		os.Exit(doUpdate(id, draft, to, args))
+		return RunUpdate(id, draft, to, args)
 	case "move":
-		os.Exit(doMove(positional(rest, 0), positional(rest, 1)))
+		return RunMove(Positional(rest, 0), Positional(rest, 1))
 	case "delete":
-		os.Exit(doDelete(positional(rest, 0), hasFlag(args, "--force") || hasFlag(args, "--yes")))
+		return RunDelete(Positional(rest, 0), Has(args, "--force") || Has(args, "--yes"))
 	case "index":
-		rebuild()
+		index.Rebuild()
+		return 0
 	case "lint":
-		os.Exit(doLint())
+		return lint.RunLint()
 	case "search":
 		limit := 5
-		if v := flagValue(rest, "-n"); v != "" {
+		if v := Value(rest, "-n"); v != "" {
 			if x, err := strconv.Atoi(v); err == nil && x > 0 {
 				limit = x
 			}
-		} else if v := flagValue(rest, "--limit"); v != "" {
+		} else if v := Value(rest, "--limit"); v != "" {
 			if x, err := strconv.Atoi(v); err == nil && x > 0 {
 				limit = x
 			}
 		}
-		os.Exit(doSearch(positional(rest, 0), limit, hasFlag(args, "--json")))
+		return search.Run(Positional(rest, 0), limit, Has(args, "--json"))
 	case "push":
-		os.Exit(push(false))
+		return gitx.Push(false)
 	case "sync":
-		os.Exit(syncCmd())
+		return gitx.Sync()
 	default:
-		fmt.Println(usageTx)
-		os.Exit(2)
+		fmt.Println(Usage)
+		return 2
 	}
 }

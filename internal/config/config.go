@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"encoding/json"
@@ -6,20 +6,22 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"kbapp/internal/store"
 )
 
 // ---------- 配置（~/.config/kb/config.json）----------
 
-func kbConfigPath() string {
+func Path() string {
 	if v := os.Getenv("KB_CONFIG"); v != "" {
 		return v
 	}
 	return filepath.Join(os.Getenv("HOME"), ".config", "kb", "config.json")
 }
 
-func loadConfig() map[string]string {
+func Load() map[string]string {
 	m := map[string]string{}
-	b, err := os.ReadFile(kbConfigPath())
+	b, err := os.ReadFile(Path())
 	if err != nil {
 		return m
 	}
@@ -35,8 +37,8 @@ func loadConfig() map[string]string {
 	return m
 }
 
-func saveConfig(m map[string]string) error {
-	p := kbConfigPath()
+func Save(m map[string]string) error {
+	p := Path()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
@@ -44,17 +46,17 @@ func saveConfig(m map[string]string) error {
 	return os.WriteFile(p, append(b, '\n'), 0o644)
 }
 
-// doConfig：kb config（打印）/ kb config set <key> <value> / kb config unset <key>
-func doConfig(args []string) int {
+// RunConfig：kb config（打印）/ kb config set <key> <value> / kb config unset <key>
+func RunConfig(args []string) int {
 	pos := []string{}
 	for _, a := range args {
 		if !strings.HasPrefix(a, "-") {
 			pos = append(pos, a)
 		}
 	}
-	m := loadConfig()
+	m := Load()
 	if len(pos) == 0 {
-		fmt.Println("# " + kbConfigPath())
+		fmt.Println("# " + Path())
 		b, _ := json.MarshalIndent(m, "", "  ")
 		fmt.Println(string(b))
 		return 0
@@ -66,7 +68,7 @@ func doConfig(args []string) int {
 			return 4
 		}
 		m[pos[1]] = pos[2]
-		if err := saveConfig(m); err != nil {
+		if err := Save(m); err != nil {
 			fmt.Println("写配置失败：" + err.Error())
 			return 1
 		}
@@ -78,7 +80,7 @@ func doConfig(args []string) int {
 			return 4
 		}
 		delete(m, pos[1])
-		if err := saveConfig(m); err != nil {
+		if err := Save(m); err != nil {
 			fmt.Println("写配置失败：" + err.Error())
 			return 1
 		}
@@ -90,9 +92,9 @@ func doConfig(args []string) int {
 	}
 }
 
-// doHelpWrite：打印写入须知（由配置 write_guide 指向的条目）
-func doHelpWrite() int {
-	m := loadConfig()
+// HelpWrite：打印写入须知（由配置 write_guide 指向的条目）
+func HelpWrite() int {
+	m := Load()
 	id := m["write_guide"]
 	if id == "" {
 		fmt.Print(`未设置写入须知条目。设置方法：
@@ -104,7 +106,7 @@ func doHelpWrite() int {
 `)
 		return 1
 	}
-	p := idToPath(id)
+	p := store.IDToPath(id)
 	if p == "" {
 		fmt.Printf("配置的写入须知条目不存在：%s（用 kb config set write_guide <id> 修正）\n", id)
 		return 1
@@ -114,6 +116,6 @@ func doHelpWrite() int {
 		fmt.Println("读取失败：" + err.Error())
 		return 1
 	}
-	fmt.Printf("# 写入须知（%s  %s）\n\n%s", mustID(rel(p)), rel(p), string(b))
+	fmt.Printf("# 写入须知（%s  %s）\n\n%s", store.MustID(store.Rel(p)), store.Rel(p), string(b))
 	return 0
 }

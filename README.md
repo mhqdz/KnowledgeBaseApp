@@ -21,21 +21,27 @@ kb version                                                             # 应打�
 
 ## 代码结构
 
-`main.go` 只是入口（初始化 + 分发子命令），其余按职责分文件：
+`main` 只做入口，逻辑按职责分包（都能 `import`，记忆/其它工具可以直接复用）：
 
-| 文件 | 职责 |
-|---|---|
-| `store.go` | 知识库根目录、id ⇄ 路径推导、目录遍历、槽位分配、目录解析 |
-| `entry.go` | `.kbx` 格式：front matter 解析/生成、正文、摘要 |
-| `index.go` | SQLite 派生索引（entries / tags，`upsert` / `dropRow` / `rebuild`） |
-| `tags.go` | tag 规范检查（同条目内近似、跨条目拼写近似/包含） |
-| `search.go` | 检索分词与评分 |
-| `lint.go` | 只读体检（文件 + DB 一致性） |
-| `git.go` | commit / push / sync |
-| `config.go` | `~/.config/kb/config.json`、写入须知 |
-| `args.go` | 位置参数与 flag 解析（flag 任意位置） |
-| `cmd_show.go` | `id` / `get` / `ls` / `tree` |
-| `cmd_write.go` | `add` / `update` / `move` / `delete` |
+```
+cmd/kb/main.go            入口：注入版本号，把 os.Args 交给 cli.Run
+internal/cli/             子命令分发 + 参数解析 + 各命令实现（唯一的输出层）
+  cli.go                    Run()：初始化路径、自愈、switch 分发、usage
+  args.go                   positional / flagValue / hasFlag（flag 任意位置）
+  show.go                   id / get / ls / tree
+  write.go                  add / update / move / delete
+internal/store/           根目录、id ⇄ 路径、遍历、槽位、类目解析（最底层，无内部依赖）
+internal/entry/           .kbx 格式：front matter、正文、摘要
+internal/index/           SQLite 派生索引（entries / tags）
+internal/tag/             tag 规范检查（近似/包含）
+internal/search/          检索分词、中文 2-gram、评分
+internal/lint/            只读体检（文件 + DB 一致性）
+internal/gitx/            commit / push / sync
+internal/config/          ~/.config/kb/config.json 与写入须知
+```
+
+依赖方向单向：`cli → {search,lint,index,tag,config,gitx,store} → {entry,store}`，
+没有循环。全局状态只有 `store.Root` / `store.DBPath` 两个变量（由 `cli.Run` 初始化）。
 
 ## 使用方法（简）
 ```bash

@@ -1,13 +1,16 @@
-package main
+package tag
 
 import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"kbapp/internal/entry"
+	"kbapp/internal/store"
 )
 
 // ---------- 相似 tag 检查 ----------
-func editDist(a, b string) int {
+func Dist(a, b string) int {
 	ra, rb := []rune(a), []rune(b)
 	prev := make([]int, len(rb)+1)
 	for j := range prev {
@@ -35,7 +38,7 @@ func editDist(a, b string) int {
 	return prev[len(rb)]
 }
 
-func splitTags(s string) []string {
+func Split(s string) []string {
 	out := []string{}
 	for _, t := range strings.FieldsFunc(s, func(r rune) bool {
 		return r == ',' || r == '，' || r == '、' || r == ';' || r == '；' || r == ' '
@@ -47,11 +50,11 @@ func splitTags(s string) []string {
 	return out
 }
 
-func existingTags() []string {
+func Existing() []string {
 	set := map[string]bool{}
-	for _, p := range walkEntries() {
-		m, _, _ := readEntry(p)
-		for _, t := range splitTags(m["tags"]) {
+	for _, p := range store.WalkEntries() {
+		m, _, _ := entry.Read(p)
+		for _, t := range Split(m["tags"]) {
 			set[t] = true
 		}
 	}
@@ -64,27 +67,27 @@ func existingTags() []string {
 }
 
 // 规则：同一份 tags 内部有包含/近似 → 必须确认；跨条目：拼写近似必须确认，包含关系只提示
-func similarTags(tags string, self string) (blocking []string, hints []string) {
-	list := splitTags(tags)
+func Similar(tags string, self string) (blocking []string, hints []string) {
+	list := Split(tags)
 	for a := 0; a < len(list); a++ {
 		for b := a + 1; b < len(list); b++ {
 			l1, l2 := strings.ToLower(list[a]), strings.ToLower(list[b])
-			if strings.Contains(l1, l2) || strings.Contains(l2, l1) || editDist(l1, l2) <= 1 {
+			if strings.Contains(l1, l2) || strings.Contains(l2, l1) || Dist(l1, l2) <= 1 {
 				blocking = append(blocking, fmt.Sprintf("同一条目里两个 tag 重复或近似：%q 与 %q —— 只留一个（一般留更通用的那个）", list[a], list[b]))
 			}
 		}
 	}
 	selfSet := map[string]bool{}
 	if self != "" {
-		if m, _, err := readEntry(self); err == nil {
-			for _, t := range splitTags(m["tags"]) {
+		if m, _, err := entry.Read(self); err == nil {
+			for _, t := range Split(m["tags"]) {
 				selfSet[strings.ToLower(t)] = true
 			}
 		}
 	}
 	for _, nt := range list {
 		l1 := strings.ToLower(nt)
-		for _, et := range existingTags() {
+		for _, et := range Existing() {
 			l2 := strings.ToLower(et)
 			if l1 == l2 || selfSet[l2] {
 				continue
@@ -93,7 +96,7 @@ func similarTags(tags string, self string) (blocking []string, hints []string) {
 			if m := len([]rune(l2)); m > n {
 				n = m
 			}
-			d := editDist(l1, l2)
+			d := Dist(l1, l2)
 			if d > 0 && ((n >= 4 && d*3 <= n) || (n < 4 && d <= 1)) {
 				blocking = append(blocking, fmt.Sprintf("新 tag 与已有 tag 拼写近似：%q ~ %q（是否改用已有的 %q？）", nt, et, et))
 			} else if strings.Contains(l1, l2) || strings.Contains(l2, l1) {

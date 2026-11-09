@@ -14,7 +14,7 @@
 export PATH=$PATH:/usr/local/go/bin
 cd ~/Workspace/KnowledgeBase
 COMMIT=$(git rev-parse --short HEAD)
-go build -ldflags "-X main.buildVersion=$COMMIT" -o ~/.local/bin/kb .   # 依赖 modernc.org/sqlite（纯 Go，无 cgo）
+go build -ldflags "-X main.buildVersion=$COMMIT" -o ~/.local/bin/kb ./cmd/kb   # 依赖 modernc.org/sqlite（纯 Go，无 cgo）
 kb version                                                             # 应打印出这个 commit
 # 拉不到依赖时：go env -w GOPROXY=https://goproxy.cn,direct
 ```
